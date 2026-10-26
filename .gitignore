@@ -1,0 +1,36 @@
+# ---- Android / Gradle ----
+android/.gradle/
+android/build/
+android/app/build/
+android/app/.cxx/
+android/.kotlin/
+android/local.properties
+*.apk
+*.aab
+*.hprof
+captures/
+
+# ---- 原生构建产物 ----
+build/*.exe
+*.o
+*.so
+*.a
+
+# ---- Python ----
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# ---- 编辑器 / 系统 ----
+.idea/
+*.iml
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+
+# ---- 本地临时输出 ----
+out/
+tmp/
+*.log

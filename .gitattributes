@@ -1,0 +1,21 @@
+* text=auto
+
+# 脚本统一 LF（Git Bash / Linux CI 直接可跑）
+*.sh            text eol=lf
+*.py            text eol=lf
+*.kt            text eol=lf
+*.kts           text eol=lf
+*.c             text eol=lf
+*.h             text eol=lf
+*.cpp           text eol=lf
+*.md            text eol=lf
+
+# 二进制/数据文件不要做换行转换与 diff
+*.png           binary
+*.bin           binary
+*.csv           text
+*.exe           binary
+*.whl           binary
+
+# CSV 在 diff 里按行统计更直观
+*.csv           diff=csv

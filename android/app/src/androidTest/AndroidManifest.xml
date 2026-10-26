@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      必须显式声明 AndroidJUnitRunner。
+      否则 AGP 生成的是旧版 android.test.InstrumentationTestRunner（JUnit3），
+      它扫不到 @RunWith(AndroidJUnit4::class) 的测试，运行时会报
+      "No tests found in ..."。
+    -->
+    <instrumentation
+        android:name="androidx.test.runner.AndroidJUnitRunner"
+        android:targetPackage="com.divelog.app"
+        android:label="DiveLogger 测试" />
+
+</manifest>
