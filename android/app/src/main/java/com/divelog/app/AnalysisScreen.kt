@@ -70,11 +70,14 @@ object Analysis {
     /**
      * @param siThreshold 自动合并的水面间隔阈值（与列表页设置联动）
      * @param excluded    被用户清理掉的记录（不参与分析）
+     * @param samples     剖面快照（来自 [SampleCache]）。这一页必须逐点做减压积分，
+     *                    所以要等剖面到齐；缺失的记录会被跳过，不会算出"0 减压"的假结论。
      */
     fun compute(
         data: DiveDataSet,
         siThreshold: Int = DiveMerger.DEFAULT_SI_THRESHOLD,
         excluded: Set<String> = emptySet(),
+        samples: Map<String, List<Sample>> = data.samples,
     ): AnalysisResult {
         val dives = data.dives.filter { it.file !in excluded }
         val groups = Analytics.mergeGroups(dives, siThreshold)
@@ -96,7 +99,7 @@ object Analysis {
                     startMillis = Analytics.startMillis(d),
                     durationSec = d.divetimeS,
                     maxDepth = d.maxdepthM,
-                    samples = data.samplesOf(d).map { Triple(it.t, it.depth, it.temp) },
+                    samples = (samples[d.file] ?: emptyList()).map { Triple(it.t, it.depth, it.temp) },
                 )
             }
             val merged = DiveMerger.mergeGroup(records, mergedId = first.no) ?: continue
@@ -143,21 +146,28 @@ fun AnalysisScreen(
     settings: DiveSettings,
     excluded: Set<String>,
     onOpen: (Dive) -> Unit,
+    samples: Map<String, List<Sample>> = emptyMap(),
+    samplesLoading: Boolean = false,
+    samplesProgress: Float = 1f,
 ) {
-    var result by remember(data) { mutableStateOf<AnalysisResult?>(null) }
-    LaunchedEffect(data, settings, excluded) {
+    var result by remember(data, samples) { mutableStateOf<AnalysisResult?>(null) }
+    LaunchedEffect(data, settings, excluded, samples) {
         result = null
         result = withContext(Dispatchers.Default) {
-            Analysis.compute(data, settings.siThresholdS, excluded)
+            Analysis.compute(data, settings.siThresholdS, excluded, samples)
         }
     }
 
     val r = result
-    if (r == null) {
+    if (r == null || samplesLoading && samples.isEmpty()) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 CircularProgressIndicator()
-                Text("正在计算…", Modifier.padding(top = 10.dp), style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    if (samplesLoading) "正在载入剖面 ${(samplesProgress * 100).toInt()}%…" else "正在计算…",
+                    Modifier.padding(top = 10.dp),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
             }
         }
         return

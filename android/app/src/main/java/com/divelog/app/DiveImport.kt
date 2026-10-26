@@ -57,17 +57,23 @@ object DiveIngest {
         return "${base}_$i"
     }
 
-    /** 解析结果 -> [Dive]。 */
-    fun toDive(p: DiveParser.Dive, id: String, no: Int): Dive = Dive(
-        file = id,
-        no = no,
-        datetime = p.dateText,
-        divetimeS = p.divetime,
-        maxdepthM = p.maxdepth,
-        tempMinC = p.tempMin,
-        nsamples = if (p.sampleCount > 0) p.sampleCount else p.samples.size,
-        bytes = p.bytes.toLong(),
-    )
+    /**
+     * 解析结果 -> [Dive]。
+     *
+     * 摘要（平均深度 / 最高水温 / 气体种类数）在**这里**算好，
+     * 之后列表只读 dive 表的列，不再为每条记录回扫一遍采样点。
+     */
+    fun toDive(p: DiveParser.Dive, id: String, no: Int, samples: List<Sample> = toSamples(p)): Dive =
+        Dive(
+            file = id,
+            no = no,
+            datetime = p.dateText,
+            divetimeS = p.divetime,
+            maxdepthM = p.maxdepth,
+            tempMinC = p.tempMin,
+            nsamples = if (p.sampleCount > 0) p.sampleCount else p.samples.size,
+            bytes = p.bytes.toLong(),
+        ).withSummary(samples)
 
     fun toSamples(p: DiveParser.Dive): List<Sample> =
         p.samples.map { Sample(it.t, it.depth, it.temp, it.gas) }

@@ -179,10 +179,12 @@ class MarksSurviveSyncTest {
     }
 
     @Test
-    fun `库版本升级到 2 且新列可读写`() {
-        assertEquals(2, DiveDb.DB_VERSION)
+    fun `库版本升级到 3 且新列可读写`() {
+        assertEquals(3, DiveDb.DB_VERSION)
         db.insertAll(listOf(row("a", favorite = true)))
         // 能读到新列就说明建表语句与查询语句是同一套字段
         assertTrue(db.metaMap()["a"]!!.favorite)
+        // v3 的摘要列也要能读回来（列表懒加载就靠它）
+        assertEquals(0.0, db.allDives().single().avgDepthM, 1e-9)
     }
 }

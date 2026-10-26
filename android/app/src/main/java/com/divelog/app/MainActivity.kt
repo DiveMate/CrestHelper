@@ -38,6 +38,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -116,12 +117,17 @@ fun DiveApp() {
     var importing by remember { mutableStateOf(false) }
     var importedCount by remember { mutableIntStateOf(0) }
 
+    // 剖面（六万个采样点）走独立通道：摘要先出列表，剖面在后台分块载入。
+    val sampleState by repo.samples.state.collectAsState()
+
     suspend fun reload() {
         data = repo.load(force = true)
         manualGroups = withContext(Dispatchers.IO) { repo.manualGroups() }
         importedCount = withContext(Dispatchers.IO) {
             repo.db.count("source <> ?", arrayOf("builtin"))
         }
+        // 摘要换了一轮，剖面也跟着补（invalidate 过的会重读；没变过的直接命中）
+        runCatching { repo.samples.loadAll() }
     }
 
     LaunchedEffect(Unit) {
@@ -170,7 +176,8 @@ fun DiveApp() {
             settings = settings,
             manualGroups = manualGroups,
             deleted = deleted,
-            samplesOf = { ds.samplesOf(it) },
+            // 刻意不传 samplesOf：列表只要摘要（平均深度/水温/气体数已在 dive 表里算好），
+            // 剖面对列表有价值的地方只有详情页，那里单独从 SampleCache 取。
             metaOf = { ds.metaOf(it) },
             defaultGas = gasSettings.gas,
         )
@@ -258,6 +265,10 @@ fun DiveApp() {
 
     // 详情页独占屏幕（避免和底部导航叠在一起）
     if (openEntry != null) {
+        // 直接跳到某条记录：只补这一条的剖面（几百行、几毫秒），不必等全量载入
+        LaunchedEffect(openEntry.id) {
+            runCatching { repo.samples.ensure(openEntry.records.map { it.file }) }
+        }
         DiveDetailScreen(
             entry = openEntry,
             deco = decoSettings,
@@ -266,6 +277,8 @@ fun DiveApp() {
             onBack = { openId = null },
             canUnmerge = manualGroups.any { it.toSet() == openEntry.records.map { r -> r.file }.toSet() },
             onUnmerge = { unmerge(openEntry) },
+            samples = sampleState.map,
+            loading = sampleState.loading,
         )
         return
     }
@@ -330,12 +343,18 @@ fun DiveApp() {
                         onMergeSelected = { mergeSelected(it) },
                         onToggleFavorite = { toggleFavorite(it) },
                         onDelete = { deleteEntries(listOf(it)) },
+                        profileProgress = sampleState.progress.takeIf { sampleState.loading },
+                        profileLoaded = sampleState.loadedDives,
+                        profileTotal = sampleState.totalDives,
                     )
 
                     tab == 1 -> AnalysisScreen(
                         data = ds,
                         settings = settings,
                         excluded = deleted,
+                        samples = sampleState.map,
+                        samplesLoading = sampleState.loading,
+                        samplesProgress = sampleState.progress,
                         onOpen = { dive ->
                             openId = entries.firstOrNull { e -> e.records.any { it.file == dive.file } }?.id
                         },

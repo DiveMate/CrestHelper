@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -15,6 +16,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -47,6 +49,11 @@ import kotlin.math.abs
  * 指标：最大/平均深度、最低/最高水温、GF99、最小安全深度、NDL；
  * 图：深度剖面（叠加水温与最小安全深度）、NDL 剩余、GF99；
  * 算法切换会重新积分整条剖面（数值与 deco.py 一致，见 DecoTest）。
+ *
+ * 剖面**不从这里查库**：由调用方把 [SampleCache] 的快照传进来。
+ * 缓存是分块载入的，所以先进页面时 [samples] 里可能还没有这条 ——
+ * 这时指标卡照常显示（走摘要），图区显示「剖面载入中」，
+ * 等后台把这条补进来（[SampleCache.ensure]）后自动换成真图。
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -58,12 +65,22 @@ fun DiveDetailScreen(
     onBack: () -> Unit,
     canUnmerge: Boolean = false,
     onUnmerge: () -> Unit = {},
+    /** 剖面快照（file -> 采样点）。缺失表示还没载入，不是"没有剖面"。 */
+    samples: Map<String, List<Sample>> = emptyMap(),
+    /** 后台是否还在补剖面，用于把「载入中」和「确实没有剖面」区分开。 */
+    loading: Boolean = false,
 ) {
-    val algo = deco.algorithm()
-    val series = remember(entry.id, deco, entry.gas) { Deco.series(entry.samples, algo, entry.gas) }
-    val analysis = remember(entry.id, deco, entry.gas) {
-        Deco.analyzeProfile(entry.samples.map { it.t to it.depth }, algo, entry.gas)
+    // 合并组要按真实时间轴拼剖面（中间补水面段），单条直接用
+    val profile = remember(entry.id, samples) {
+        if (entry.records.size == 1) samples[entry.records[0].file] ?: entry.samples
+        else DiveEntries.mergeSamples(entry.records, entry.startMillis) { samples[it.file] ?: emptyList() }
     }
+    val algo = deco.algorithm()
+    val series = remember(entry.id, deco, entry.gas, profile) { Deco.series(profile, algo, entry.gas) }
+    val analysis = remember(entry.id, deco, entry.gas, profile) {
+        Deco.analyzeProfile(profile.map { it.t to it.depth }, algo, entry.gas)
+    }
+    val pending = profile.isEmpty() && (entry.primary.nsamples > 0 || loading)
     val ndlMin = series.minOfOrNull { it.ndl } ?: 0
     val ndlEnd = series.lastOrNull()?.ndl ?: 0
     val maxTemp = series.mapNotNull { it.temp }.maxOrNull() ?: entry.tempMaxC
@@ -180,28 +197,45 @@ fun DiveDetailScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
-            // 剖面图
-            SectionTitle("深度剖面", "含水温曲线与最小安全深度")
-            Card {
-                Column(Modifier.padding(8.dp)) {
-                    DepthProfileChart(series = series)
-                    Legend()
+            if (pending) {
+                // 摘要已经够画指标卡，但剖面还在后台补；不要拿空剖面画一张假图
+                Card {
+                    Row(
+                        Modifier.fillMaxWidth().padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Text(
+                            "正在载入这条的剖面…",
+                            Modifier.padding(start = 12.dp),
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
                 }
-            }
-
-            // NDL
-            SectionTitle("NDL 剩余", "底部红条 = 该时段已进入减压；虚线是 20 分钟余量参考")
-            Card {
-                Column(Modifier.padding(8.dp)) {
-                    NdlChart(series)
+            } else {
+                // 剖面图
+                SectionTitle("深度剖面", "含水温曲线与最小安全深度")
+                Card {
+                    Column(Modifier.padding(8.dp)) {
+                        DepthProfileChart(series = series)
+                        Legend()
+                    }
                 }
-            }
 
-            // GF99
-            SectionTitle("GF99 曲线", "超过 100% 即越过原始 M 值线")
-            Card {
-                Column(Modifier.padding(8.dp)) {
-                    Gf99Chart(series)
+                // NDL
+                SectionTitle("NDL 剩余", "底部红条 = 该时段已进入减压；虚线是 20 分钟余量参考")
+                Card {
+                    Column(Modifier.padding(8.dp)) {
+                        NdlChart(series)
+                    }
+                }
+
+                // GF99
+                SectionTitle("GF99 曲线", "超过 100% 即越过原始 M 值线")
+                Card {
+                    Column(Modifier.padding(8.dp)) {
+                        Gf99Chart(series)
+                    }
                 }
             }
 
@@ -210,7 +244,7 @@ fun DiveDetailScreen(
                 Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     InfoLine("开始时间", entry.primary.datetime)
                     InfoLine("水下时长", entry.durationText + if (entry.isMerged) "（含水面间隔）" else "")
-                    InfoLine("采样点", "${entry.samples.size}")
+                    InfoLine("采样点", "${entry.primary.nsamples}" + if (entry.isMerged) "（合并后已载入 ${profile.size}）" else "")
                     InfoLine("原始大小", "${entry.records.sumOf { it.bytes }} 字节")
                     if (entry.isMerged) {
                         InfoLine("合并记录", entry.records.joinToString(", ") { "#${it.no}" })

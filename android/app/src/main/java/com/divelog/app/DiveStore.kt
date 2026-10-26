@@ -320,6 +320,9 @@ object DiveEntries {
         val idx = HashSet<Int>()
         for (r in records) for (s in samplesOf(r)) s.gas?.let { idx.add(it) }
         if (idx.isNotEmpty()) return idx.size
+        // 剖面还没进内存时用入库时算好的摘要（列表页走的就是这条路）
+        val fromSummary = records.maxOfOrNull { it.gasCount } ?: 0
+        if (fromSummary > 0) return fromSummary
         // 记录里没写的话，就看元数据里有没有值（手动标注也算一种）
         return if (records.any { metaOf(it)?.gasO2 != null }) 1 else 0
     }
@@ -346,12 +349,25 @@ object DiveEntries {
         return out
     }
 
-    /** 时间加权平均深度（梯形积分；只算水下段，不含水面间隔）。 */
+    /**
+     * 时间加权平均深度（梯形积分；只算水下段，不含水面间隔）。
+     *
+     * 剖面没进内存时回落到入库时算好的 `avg_depth_m`，按水下时长加权 ——
+     * 这样列表页不必等六万个采样点读完就能显示正确的平均深度，
+     * 而且两种口径走的是同一套梯形积分（见 [SampleStats.avgDepth]），结果一致。
+     */
     fun avgDepth(records: List<Dive>, samplesOf: (Dive) -> List<Sample>): Double {
         var area = 0.0
         var time = 0.0
         for (r in records) {
             val s = samplesOf(r)
+            if (s.size < 2) {
+                if (r.avgDepthM > 0 && r.divetimeS > 0) {
+                    area += r.avgDepthM * r.divetimeS
+                    time += r.divetimeS
+                }
+                continue
+            }
             for (i in 1 until s.size) {
                 val dt = (s[i].t - s[i - 1].t).toDouble()
                 if (dt <= 0) continue
@@ -377,7 +393,8 @@ object DiveEntries {
             val t = s.temp ?: continue
             if (v == null || t > v!!) v = t
         }
-        return v
+        // 摘要里的最高水温（入库时算的）兜底，列表页不依赖剖面
+        return v ?: records.mapNotNull { it.tempMaxC }.maxOrNull()
     }
 }
 

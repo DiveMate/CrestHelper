@@ -12,6 +12,11 @@ import com.divelog.app.data.SyncRunRecord
 import com.divelog.app.data.WatchProgress
 import com.divelog.app.data.WatchRecord
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.BufferedReader
 import java.io.File
@@ -28,7 +33,14 @@ import kotlin.math.abs
  * 解析逻辑是纯 Kotlin（只依赖 BufferedReader），可以在 JVM 单元测试里直接跑。
  */
 
-/** 一条潜水的汇总（对应 dives.csv 一行）。 */
+/**
+ * 一条潜水的**摘要**（对应 dive 表一行）。
+ *
+ * 为什么摘要要自带平均深度/最高水温/气体数：
+ * 列表要给每条记录显示这些指标，如果每次都遍历采样点，253 条 × 240 点就是 6 万次读取，
+ * 数据量涨到几千条时首屏会明显卡。这些值在**入库时算一次**存成列，
+ * 列表就只读摘要（一行几十字节），采样点在后台另行全量载入。
+ */
 data class Dive(
     val file: String,
     val no: Int,
@@ -38,6 +50,12 @@ data class Dive(
     val tempMinC: Double,
     val nsamples: Int,
     val bytes: Long,
+    /** 时间加权平均深度（入库时按采样点算好；0 表示老数据没算过，回落到采样点）。 */
+    val avgDepthM: Double = 0.0,
+    /** 最高水温；记录没写就是 null。 */
+    val tempMaxC: Double? = null,
+    /** 记录里出现过的不同气体数（0 = 记录里没有气体信息）。 */
+    val gasCount: Int = 0,
 ) {
     val year: Int get() = datetime.take(4).toIntOrNull() ?: 0
     val month: Int get() = datetime.drop(5).take(2).toIntOrNull() ?: 0
@@ -50,10 +68,54 @@ data class Dive(
 /** 一个采样点。temperature 可能缺失（原始设备未记录）。 */
 data class Sample(val t: Int, val depth: Double, val temp: Double?, val gas: Int? = null)
 
-/** 全量数据集。 */
+/**
+ * 采样点 -> 摘要。**入库时算一次**，之后列表只看列，不再回扫采样点。
+ *
+ * 口径与 [DiveEntries.avgDepth] 完全一致（梯形积分），
+ * 所以「入库算的」和「回扫算的」对同一条记录给出同一个数。
+ */
+object SampleStats {
+
+    /** 时间加权平均深度；没有可用采样点时返回 0。 */
+    fun avgDepth(samples: List<Sample>): Double {
+        var area = 0.0
+        var time = 0.0
+        for (i in 1 until samples.size) {
+            val dt = (samples[i].t - samples[i - 1].t).toDouble()
+            if (dt <= 0) continue
+            area += (samples[i].depth + samples[i - 1].depth) / 2.0 * dt
+            time += dt
+        }
+        return if (time > 0) area / time else 0.0
+    }
+
+    fun maxTemp(samples: List<Sample>): Double? =
+        samples.mapNotNull { it.temp }.maxOrNull()
+
+    fun minTemp(samples: List<Sample>): Double? =
+        samples.mapNotNull { it.temp }.minOrNull()
+
+    /** 记录里出现过几种不同气体；0 表示没写。 */
+    fun gasCount(samples: List<Sample>): Int =
+        samples.mapNotNull { it.gas }.distinct().size
+}
+
+/** 补上摘要字段（入库前调用一次，之后列表只读列）。 */
+fun Dive.withSummary(samples: List<Sample>): Dive = copy(
+    avgDepthM = if (samples.isEmpty()) avgDepthM else SampleStats.avgDepth(samples),
+    tempMaxC = SampleStats.maxTemp(samples) ?: tempMaxC,
+    gasCount = SampleStats.gasCount(samples).takeIf { it > 0 } ?: gasCount,
+)
+
+/**
+ * 全量数据集 = 摘要 + 元数据。
+ *
+ * [samples] **默认是空的**：正常启动只载入摘要，剖面走 [SampleCache]。
+ * 保留这个字段是因为旧版 CSV 迁移（[ImportedStore]）与单测需要一次性拿到全量剖面。
+ */
 data class DiveDataSet(
     val dives: List<Dive>,
-    val samples: Map<String, List<Sample>>,
+    val samples: Map<String, List<Sample>> = emptyMap(),
     /** 每条原始记录的元数据：来源 / 手表编号 / 合并归属 / 过滤标记 / 收藏 / 气体。 */
     val meta: Map<String, DiveMeta> = emptyMap(),
 ) {
@@ -124,6 +186,168 @@ object DiveCsv {
 }
 
 /**
+ * 采样点缓存：**全量常驻内存**，但载入是异步的。
+ *
+ * 分层思路：
+ *   1. 列表只要摘要（dive 表）→ 一次 SELECT 就能出首屏，几十毫秒；
+ *   2. 采样点（6 万点 ≈ 3 MB）在后台一次性读进内存，
+ *      读完通过 [state] 换一份快照，Compose 侧订阅后自动重绘剖面；
+ *   3. 全量还没读完时点进详情页也不会干等： [ensure] 只把这条潜水补进缓存
+ *      （单条查询 + 两百行），比等全量快一个量级。
+ *
+ * 之所以全量留在内存而不是每次查库：剖面图、NDL 积分、合并拼接都要反复读同几个点，
+ * 单次查询虽快，但滚动/切算法时会查上百次；一次性 3 MB 换掉这些往返更划算。
+ */
+class SampleCache(
+    private val db: DiveDb,
+    /** 一轮读多少条记录的剖面。一批约 250 点，40 条 ≈ 1 万点 ≈ 10ms，够细也不碎。 */
+    private val chunk: Int = 40,
+) {
+
+    /** 一份不可变快照，换新即触发重组。 */
+    data class Snapshot(
+        val map: Map<String, List<Sample>> = emptyMap(),
+        /** 全量载入是否完成。false 时详情页会走 [ensure] 单条补齐。 */
+        val complete: Boolean = false,
+        val loading: Boolean = false,
+        /** 库里的采样点总数（进度文案用）。 */
+        val total: Int = 0,
+        /** 有剖面的记录数。 */
+        val totalDives: Int = 0,
+        /** 已经进缓存多少条记录。 */
+        val loadedDives: Int = 0,
+    ) {
+        val count: Int get() = map.values.sumOf { it.size }
+        fun of(id: String): List<Sample> = map[id] ?: emptyList()
+        /** 0f..1f；没有剖面时算 1f（不用显示进度条）。 */
+        val progress: Float
+            get() = if (totalDives <= 0) 1f else (loadedDives.toFloat() / totalDives).coerceIn(0f, 1f)
+    }
+
+    private val _state = MutableStateFlow(Snapshot())
+    val state: StateFlow<Snapshot> = _state.asStateFlow()
+
+    private val mutex = Mutex()
+
+    /**
+     * 数据版本号：导入/同步/清空时 +1。
+     *
+     * 用来处理「一边载入一边导数据」的竞态：载入开始时记下版本号，
+     * 结束时对不上就说明中途进了新记录，这份快照不能算完整，
+     * 否则那一批新记录要等下次冷启动才出现。
+     */
+    @Volatile
+    private var generation = 0
+
+    /**
+     * 全量载入内存，**分块推进**：每读完一批就换一份快照，
+     * 界面订阅 [state] 就能看到「剖面 120/253」一直往前爬，而不是卡住几百毫秒。
+     *
+     * 重复调用直接复用结果；[force] 可强刷（导入/同步之后）。
+     * 正在载入时再次调用会直接返回当前快照，不排队也不重复读。
+     */
+    suspend fun loadAll(force: Boolean = false): Snapshot = mutex.withLock {
+        var snap = _state.value
+        if (snap.loading) return@withLock snap
+        if (snap.complete && !force) return@withLock snap
+        var round = 0
+        while (true) {
+            snap = loadRound()
+            // 载入期间进过新记录就再来一轮；最多两轮，防止边同步边载入时死转
+            if (snap.complete || ++round >= 2) break
+        }
+        snap
+    }
+
+    /** 读一轮：每批换一份快照；返回的快照 `complete` 为 false 表示数据在载入期间变过。 */
+    private suspend fun loadRound(): Snapshot {
+        val cur = _state.value
+        val gen = generation
+        val ids = withContext(Dispatchers.IO) { db.diveIdsWithSamples() }
+        val totalSamples = withContext(Dispatchers.IO) { db.sampleCount() }
+        // 已缓存且仍存在的记录直接留着，只补缺的
+        val keep = cur.map.filterKeys { it in ids }
+        val todo = ids.filter { it !in keep }
+        val map = HashMap<String, List<Sample>>(keep)
+
+        _state.value = Snapshot(
+            map = map,
+            complete = todo.isEmpty() && generation == gen,
+            loading = todo.isNotEmpty(),
+            total = totalSamples,
+            totalDives = ids.size,
+            loadedDives = keep.size,
+        )
+        if (todo.isEmpty()) return _state.value
+
+        try {
+            var loaded = keep.size
+            for (part in todo.chunked(chunk)) {
+                val got = withContext(Dispatchers.IO) { db.samplesOf(part) }
+                map.putAll(got)
+                loaded += part.size
+                _state.value = Snapshot(
+                    map = HashMap(map),
+                    complete = false,
+                    loading = true,
+                    total = totalSamples,
+                    totalDives = ids.size,
+                    loadedDives = loaded,
+                )
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            // 界面销毁不算失败：保留已读到的，下次接着补
+            _state.value = _state.value.copy(loading = false)
+            throw e
+        }
+
+        return Snapshot(
+            map = HashMap(map),
+            // 中途进过新记录 => 这份快照不算完整，再来一轮补齐
+            complete = generation == gen,
+            loading = false,
+            total = totalSamples,
+            totalDives = ids.size,
+            loadedDives = ids.size,
+        ).also { _state.value = it }
+    }
+
+    /**
+     * 保证这几条记录的剖面在缓存里（详情页兜底）。
+     * 已经在缓存里的不会重复读；全量载入完成后这里是纯内存命中。
+     *
+     * 这是「跳到任意一条记录也不用等全量」的关键：单条查询只要几毫秒。
+     */
+    suspend fun ensure(ids: Collection<String>): Snapshot {
+        val cur = _state.value
+        val missing = ids.filter { it !in cur.map }
+        if (missing.isEmpty()) return cur
+        val extra = withContext(Dispatchers.IO) { db.samplesOf(missing) }
+        if (extra.isEmpty()) return _state.value
+        val now = _state.value
+        return now.copy(
+            map = now.map + extra,
+            loadedDives = (now.loadedDives + extra.size).coerceAtMost(now.totalDives),
+        ).also { _state.value = it }
+    }
+
+    fun cached(id: String): List<Sample>? = _state.value.map[id]
+
+    /**
+     * 数据有增减（导入 / 同步 / 清空）后调用：标记缓存失效。
+     * 不立刻重读——等界面下次 [loadAll] 时再补，避免导入 20 条就重读 6 万点。
+     *
+     * 同时推进 [generation]：即使此刻正在载入，那一轮结束时也会发现自己过期，
+     * 不会把「少了几条新记录」的快照当成完整结果。
+     */
+    fun invalidate() {
+        generation++
+        val cur = _state.value
+        if (cur.complete) _state.value = cur.copy(complete = false)
+    }
+}
+
+/**
  * 数据仓库。
  *
  * 唯一的真源是 SQLite（[DiveDb]）：
@@ -131,10 +355,15 @@ object DiveCsv {
  *   - 之后无论文件导入还是手表下载，都只往库里写，CSV 不再参与运行时读写；
  *   - 原始字节（.bin）仍然单独落盘到 `files/raw/`，库里只存路径——这样随时能重放解析，
  *     而合并/过滤只改标记位，绝不动原始数据。
+ *
+ * 读取分两条通道：**[load] 只出摘要**（列表首屏），**[samples] 负责剖面**（后台全量）。
  */
 class DiveRepository(private val ctx: Context) {
 
     val db: DiveDb = DiveDb(ctx.applicationContext)
+
+    /** 采样点缓存：启动后由界面层触发 `loadAll()`，这里只提供通道。 */
+    val samples = SampleCache(db)
 
     /** 旧版 CSV 导入目录：只在一次性迁移时读。 */
     private val legacyStore = ImportedStore(File(ctx.filesDir, "imported"))
@@ -143,16 +372,31 @@ class DiveRepository(private val ctx: Context) {
     @Volatile
     private var cached: DiveDataSet? = null
 
+    /**
+     * 载入**摘要**（不含采样点）：一次 SELECT 就够。
+     *
+     * 采样点走 [samples] 的独立通道 —— 列表不必等六万个点读完才能显示，
+     * 这也是「先出列表、剖面后到」的实现基础。
+     */
     suspend fun load(force: Boolean = false): DiveDataSet = withContext(Dispatchers.IO) {
         cached?.takeIf { !force }?.let { return@withContext it }
         seedIfNeeded()
+        backfillSummariesIfNeeded()
         val ds = DiveDataSet(
             dives = db.allDives(),
-            samples = db.allSamples(),
             meta = db.metaMap(),
         )
         cached = ds
         ds
+    }
+
+    /**
+     * v2 -> v3 迁移：老数据没有 avg_depth_m / temp_max_c，
+     * 这里按采样点算一遍写回。只跑一次（判据是「有采样点但 avg_depth_m = 0」）。
+     */
+    private fun backfillSummariesIfNeeded() {
+        if (!db.needsSummaryBackfill()) return
+        db.backfillSummaries()
     }
 
     /** 库为空时的一次性初始化：内置数据 + 旧 CSV + 旧设置里的删除/合并标记。 */
@@ -164,10 +408,11 @@ class DiveRepository(private val ctx: Context) {
         val builtinSamples = ctx.assets.open("samples.csv").bufferedReader().use { DiveCsv.parseSamples(it) }
         ctx.assets.open("dives.csv").bufferedReader().use { reader ->
             for (d in DiveCsv.parseDives(reader)) {
+                val s = builtinSamples[d.file] ?: emptyList()
                 rows.add(
                     DiveRow(
-                        dive = d,
-                        samples = builtinSamples[d.file] ?: emptyList(),
+                        dive = d.withSummary(s),
+                        samples = s,
                         meta = DiveMeta(id = d.file, source = DiveSource.BUILTIN, importedAt = now),
                     )
                 )
@@ -177,10 +422,11 @@ class DiveRepository(private val ctx: Context) {
         // 旧版本用 CSV 存导入记录，这里搬进库（文件保留不删，出问题能回退）
         val legacy = legacyStore.load()
         for (d in legacy.dives) {
+            val s = legacy.samples[d.file] ?: emptyList()
             rows.add(
                 DiveRow(
-                    dive = d,
-                    samples = legacy.samples[d.file] ?: emptyList(),
+                    dive = d.withSummary(s),
+                    samples = s,
                     meta = DiveMeta(id = d.file, source = DiveSource.FILE, importedAt = now),
                 )
             )
@@ -243,7 +489,10 @@ class DiveRepository(private val ctx: Context) {
         }
         db.insertAll(rows)
         for ((id, o2, he) in gasPatches) db.setRecordGas(id, o2, he)
-        if (rows.isNotEmpty()) cached = null
+        if (rows.isNotEmpty()) {
+            cached = null
+            samples.invalidate()
+        }
         ImportSummary(added, duplicate, failed)
     }
 
@@ -297,6 +546,7 @@ class DiveRepository(private val ctx: Context) {
             )
         )
         cached = null
+        samples.invalidate()
         DiveIngest.recordGas(parsed)?.let { (o2, he) -> db.setRecordGas(id, o2, he) }
         if (isUpdate) WatchIngest.UPDATED else WatchIngest.ADDED
     }
@@ -367,12 +617,14 @@ class DiveRepository(private val ctx: Context) {
         db.clearSource(DiveSource.FILE)
         db.clearSource(DiveSource.WATCH)
         cached = null
+        samples.invalidate()
     }
 
     /** 清空某一来源（同步页的「清空本机手表数据」用）。 */
     suspend fun clearSource(source: DiveSource) = withContext(Dispatchers.IO) {
         db.clearSource(source)
         cached = null
+        samples.invalidate()
     }
 
     fun watchProgress(deviceId: String): WatchProgress? = db.watchProgress(deviceId)

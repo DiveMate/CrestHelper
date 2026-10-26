@@ -24,6 +24,7 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -55,6 +56,10 @@ fun DiveListScreen(
     onMergeSelected: (List<DiveEntry>) -> Unit,
     onToggleFavorite: (DiveEntry) -> Unit,
     onDelete: (DiveEntry) -> Unit,
+    /** 剖面后台载入进度（null = 已载完，不显示进度条）。 */
+    profileProgress: Float? = null,
+    profileLoaded: Int = 0,
+    profileTotal: Int = 0,
 ) {
     var year by remember { mutableStateOf<Int?>(null) }
     var month by remember { mutableStateOf<Int?>(null) }
@@ -171,6 +176,27 @@ fun DiveListScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+        }
+
+        // 剖面在后台分块载入：列表本身只吃摘要，所以这里只是告知进度，
+        // 不挡任何操作——想看的这条多半已经在前面几块里了。
+        if (profileProgress != null && profileProgress < 1f) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                LinearProgressIndicator(
+                    progress = { profileProgress },
+                    modifier = Modifier.weight(1f).height(3.dp),
+                )
+                Text(
+                    "剖面 $profileLoaded/$profileTotal",
+                    Modifier.padding(start = 8.dp),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Spacer(Modifier.height(6.dp))
         }
 
         LazyColumn(

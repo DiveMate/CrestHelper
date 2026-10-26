@@ -51,7 +51,11 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
                 favorite      INTEGER NOT NULL DEFAULT 0,
                 gas_o2        REAL,
                 gas_he        REAL,
-                gas_src       TEXT
+                gas_src       TEXT,
+                -- v3：摘要列。入库时按采样点算好，列表只读这些列，不必回扫 sample 表
+                avg_depth_m   REAL NOT NULL DEFAULT 0,
+                temp_max_c    REAL,
+                gas_count     INTEGER NOT NULL DEFAULT 0
             )
             """.trimIndent()
         )
@@ -129,6 +133,13 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
             db.execSQL("ALTER TABLE dive ADD COLUMN gas_he REAL")
             db.execSQL("ALTER TABLE dive ADD COLUMN gas_src TEXT")
         }
+        // v2 -> v3：摘要列（平均深度 / 最高水温 / 气体种类数）。
+        // 老行的 avg_depth_m 留 0 表示"没算过"，由 backfillSummaries() 按采样点补一遍。
+        if (oldVersion < 3) {
+            db.execSQL("ALTER TABLE dive ADD COLUMN avg_depth_m REAL NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE dive ADD COLUMN temp_max_c REAL")
+            db.execSQL("ALTER TABLE dive ADD COLUMN gas_count INTEGER NOT NULL DEFAULT 0")
+        }
     }
 
     // ------------------------------------------------------------------ 写入
@@ -155,8 +166,8 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
                 (id, source, device_id, watch_index, fingerprint, dive_no, datetime, divetime_s,
                  maxdepth_m, temp_min_c, nsamples, bytes, raw_path, imported_at,
                  group_id, merge_kind, filter_reason, user_deleted, favorite,
-                 gas_o2, gas_he, gas_src)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 gas_o2, gas_he, gas_src, avg_depth_m, temp_max_c, gas_count)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """.trimIndent()
             )
             val sSql = db.compileStatement(
@@ -209,6 +220,9 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
                 bindNullableDouble(dSql, 20, m.gasO2)
                 bindNullableDouble(dSql, 21, m.gasHe)
                 bindNullableText(dSql, 22, m.gasSource?.code)
+                dSql.bindDouble(23, d.avgDepthM)
+                bindNullableDouble(dSql, 24, d.tempMaxC)
+                dSql.bindLong(25, d.gasCount.toLong())
                 dSql.executeInsert()
 
                 delS.bindString(1, d.file)
@@ -410,8 +424,8 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
     fun allDives(): List<Dive> {
         val out = ArrayList<Dive>(512)
         readableDatabase.rawQuery(
-            "SELECT id, dive_no, datetime, divetime_s, maxdepth_m, temp_min_c, nsamples, bytes " +
-                "FROM dive ORDER BY datetime DESC",
+            "SELECT id, dive_no, datetime, divetime_s, maxdepth_m, temp_min_c, nsamples, bytes, " +
+                "avg_depth_m, temp_max_c, gas_count FROM dive ORDER BY datetime DESC",
             null
         ).use { c ->
             while (c.moveToNext()) {
@@ -425,6 +439,9 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
                         tempMinC = if (c.isNull(5)) 0.0 else c.getDouble(5),
                         nsamples = c.getInt(6),
                         bytes = c.getLong(7),
+                        avgDepthM = if (c.isNull(8)) 0.0 else c.getDouble(8),
+                        tempMaxC = if (c.isNull(9)) null else c.getDouble(9),
+                        gasCount = if (c.isNull(10)) 0 else c.getInt(10),
                     )
                 )
             }
@@ -445,6 +462,140 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
             }
         }
         return map
+    }
+
+    /** 采样点总数：全量载入前就能拿到分母，用来显示进度。 */
+    fun sampleCount(): Int =
+        readableDatabase.rawQuery("SELECT COUNT(*) FROM sample", null).use { c ->
+            if (c.moveToFirst()) c.getInt(0) else 0
+        }
+
+    /**
+     * 有剖面的记录 id（按时间倒序，最常看的排在前面）。
+     *
+     * 载入顺序不是随便定的：列表是倒序的，用户点开头几条的概率远大于翻到 2019 年，
+     * 所以先读新的——第 40 条就读到他想看的那条，不必等全量。
+     */
+    fun diveIdsWithSamples(): List<String> =
+        readableDatabase.rawQuery(
+            "SELECT d.id FROM dive d WHERE EXISTS " +
+                "(SELECT 1 FROM sample s WHERE s.dive_id = d.id) ORDER BY d.datetime DESC",
+            null
+        ).use { c ->
+            val out = ArrayList<String>(c.count)
+            while (c.moveToNext()) out.add(c.getString(0))
+            out
+        }
+
+    /**
+     * 只取指定几条记录的剖面（详情页兜底）。
+     *
+     * 单条查询比全量读快一个量级：全量 6 万行要几百毫秒，
+     * 这里一条记录通常 150~400 行，几毫秒就回来了。
+     */
+    fun samplesOf(ids: Collection<String>): Map<String, List<Sample>> {
+        if (ids.isEmpty()) return emptyMap()
+        val map = HashMap<String, MutableList<Sample>>(ids.size * 2)
+        val hold = ids.toList()
+        // SQLite 的变量上限是 999，分批查
+        for (chunk in hold.chunked(400)) {
+            val marks = chunk.joinToString(",") { "?" }
+            readableDatabase.rawQuery(
+                "SELECT dive_id, t, depth, temp FROM sample WHERE dive_id IN ($marks) ORDER BY dive_id, t",
+                chunk.toTypedArray(),
+            ).use { c ->
+                while (c.moveToNext()) {
+                    val id = c.getString(0)
+                    val temp = if (c.isNull(3)) null else c.getDouble(3)
+                    map.getOrPut(id) { ArrayList() }.add(Sample(c.getInt(1), c.getDouble(2), temp))
+                }
+            }
+        }
+        return map
+    }
+
+    /** 有采样点但摘要没算过（v2 老数据）=> 需要回填。 */
+    fun needsSummaryBackfill(): Boolean =
+        readableDatabase.rawQuery(
+            "SELECT COUNT(*) FROM dive WHERE avg_depth_m = 0 AND nsamples > 0 LIMIT 1",
+            null
+        ).use { c -> c.moveToFirst() && c.getInt(0) > 0 }
+
+    /**
+     * 按采样点补算摘要（一次性迁移用）。
+     *
+     * 只 UPDATE 摘要三列，不碰任何标记位，也不动采样点本身。
+     * gas_count 依赖采样点里的气体下标，而 sample 表不存该列，
+     * 所以老数据这里只能留 0（本来 CR-4 v0 格式也没有气体）。
+     */
+    fun backfillSummaries(): Int {
+        val avg = HashMap<String, Double>(512)
+        val tmax = HashMap<String, Double>(512)
+        var curId: String? = null
+        var prevT = 0
+        var prevD = 0.0
+        var area = 0.0
+        var time = 0.0
+
+        fun flush() {
+            val id = curId ?: return
+            if (time > 0) avg[id] = area / time
+            curId = null
+        }
+
+        readableDatabase.rawQuery(
+            "SELECT dive_id, t, depth, temp FROM sample ORDER BY dive_id, t",
+            null
+        ).use { c ->
+            while (c.moveToNext()) {
+                val id = c.getString(0)
+                val t = c.getInt(1)
+                val d = c.getDouble(2)
+                if (id != curId) {
+                    flush()
+                    curId = id
+                    area = 0.0
+                    time = 0.0
+                    prevT = t
+                    prevD = d
+                } else {
+                    val dt = (t - prevT).toDouble()
+                    if (dt > 0) {
+                        area += (d + prevD) / 2.0 * dt
+                        time += dt
+                    }
+                    prevT = t
+                    prevD = d
+                }
+                if (!c.isNull(3)) {
+                    val v = c.getDouble(3)
+                    val old = tmax[id]
+                    if (old == null || v > old) tmax[id] = v
+                }
+            }
+            flush()
+        }
+
+        if (avg.isEmpty() && tmax.isEmpty()) return 0
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val st = db.compileStatement(
+                "UPDATE dive SET avg_depth_m = ?, temp_max_c = ? WHERE id = ?"
+            )
+            for (id in (avg.keys + tmax.keys)) {
+                st.clearBindings()
+                st.bindDouble(1, avg[id] ?: 0.0)
+                val t = tmax[id]
+                if (t == null) st.bindNull(2) else st.bindDouble(2, t)
+                st.bindString(3, id)
+                st.executeUpdateDelete()
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        return avg.size
     }
 
     fun metaMap(): Map<String, DiveMeta> {
@@ -679,7 +830,7 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
 
     companion object {
         const val DB_NAME = "divelog.db"
-        const val DB_VERSION = 2
+        const val DB_VERSION = 3
     }
 }
 
