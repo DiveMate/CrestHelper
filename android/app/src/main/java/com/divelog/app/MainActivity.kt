@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
@@ -47,6 +48,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.divelog.app.sync.SyncMode
 import com.divelog.app.sync.WatchSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -55,15 +57,14 @@ import kotlinx.coroutines.withContext
 /**
  * 潜水日志 App 主入口。
  *
- * 数据来自 APK 内置的真实 CR-4 日志（data 目录的 CSV 打包进 assets），不依赖蓝牙；
- * 连接手表下载留到 Phase 3。
- *
- * 状态模型：
- *   原始 dives.csv (253 条)
- *     ├─ 用户清理掉的记录 (deleted，软删除，可恢复)
- *     ├─ 手动合并组 (manualGroups)
- *     └─ 自动合并 (settings.autoMerge / siThresholdS)
- *   → DiveEntries.build() → 展示用的 List<DiveEntry>（列表/统计/详情共用）
+ * 数据、标记、偏好全部落在 SQLite + SharedPreferences，界面只是视图：
+ *   原始记录（dive 表）
+ *     ├─ user_deleted  软删除（可恢复，永不物理删除）
+ *     ├─ favorite      收藏
+ *     ├─ gas_o2/gas_he 气体（记录自带或用户标注）
+ *     ├─ group_id      合并归属
+ *     └─ filter_reason 过滤原因
+ *   → DiveEntries.build(参数来自设置页) → 列表/统计/详情共用
  */
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -79,10 +80,11 @@ class MainActivity : ComponentActivity() {
 }
 
 private val TABS = listOf(
-    Triple("日志", Icons.Default.Home, 0),
-    Triple("分析", Icons.Default.Search, 1),
-    Triple("统计", Icons.Default.Star, 2),
-    Triple("设备", Icons.Default.Settings, 3),
+    "日志" to Icons.Default.Home,
+    "分析" to Icons.Default.Search,
+    "统计" to Icons.Default.Star,
+    "设备" to Icons.Default.Settings,
+    "设置" to Icons.Default.Build,
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -102,24 +104,31 @@ fun DiveApp() {
 
     var settings by remember { mutableStateOf(prefs.settings) }
     var junkRule by remember { mutableStateOf(prefs.junkRule) }
+    var decoSettings by remember { mutableStateOf(prefs.decoSettings) }
+    var gasSettings by remember { mutableStateOf(prefs.gasSettings) }
+    var syncMode by remember { mutableStateOf(prefs.syncMode) }
+    var pairedAddress by remember { mutableStateOf(prefs.pairedAddress) }
+    var pairedName by remember { mutableStateOf(prefs.pairedName) }
     var manualGroups by remember { mutableStateOf<List<List<String>>>(emptyList()) }
 
     var openId by remember { mutableStateOf<String?>(null) }
-    var showMergeDialog by remember { mutableStateOf(false) }
     var showCleanup by remember { mutableStateOf(false) }
     var importing by remember { mutableStateOf(false) }
     var importedCount by remember { mutableIntStateOf(0) }
 
-    LaunchedEffect(Unit) {
-        runCatching { repo.load() }
-            .onSuccess {
-                data = it
-                manualGroups = withContext(Dispatchers.IO) { repo.manualGroups() }
-            }
-            .onFailure { error = it.message ?: it.toString() }
+    suspend fun reload() {
+        data = repo.load(force = true)
+        manualGroups = withContext(Dispatchers.IO) { repo.manualGroups() }
+        importedCount = withContext(Dispatchers.IO) {
+            repo.db.count("source <> ?", arrayOf("builtin"))
+        }
     }
 
-    // 导入 .bin：读字节 -> 解析 -> 落盘 -> 重载数据集（与 Phase 3 蓝牙下载共用一条路径）
+    LaunchedEffect(Unit) {
+        runCatching { reload() }.onFailure { error = it.message ?: it.toString() }
+    }
+
+    // 导入 .bin：读字节 -> 解析 -> 落盘 -> 重载数据集（与蓝牙下载共用一条路径）
     val importLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
     ) { uris ->
@@ -139,26 +148,32 @@ fun DiveApp() {
                     snackbarHost.showSnackbar("导入出错：${it.message ?: it}")
                     return@launch
                 }
-            data = repo.load(force = true)
-            importedCount = withContext(Dispatchers.IO) { repo.db.count("source <> ?", arrayOf("builtin")) }
+            reload()
             importing = false
             snackbarHost.showSnackbar(summary.text)
         }
-    }
-
-    LaunchedEffect(data) {
-        importedCount = withContext(Dispatchers.IO) { repo.db.count("source <> ?", arrayOf("builtin")) }
     }
 
     // 软删除标记直接来自元数据表（原始记录仍在库里，只是被标了 user_deleted）
     val deleted = remember(data) {
         data?.meta?.values?.filter { it.userDeleted }?.mapTo(HashSet()) { it.id } ?: emptySet<String>()
     }
+    val favorites = remember(data) {
+        data?.meta?.values?.filter { it.favorite }?.mapTo(HashSet()) { it.id } ?: emptySet<String>()
+    }
 
-    val entries = remember(data, settings, deleted, manualGroups) {
+    val entries = remember(data, settings, deleted, manualGroups, gasSettings) {
         val ds = data
         if (ds == null) emptyList()
-        else DiveEntries.build(ds.dives, settings, manualGroups, deleted) { ds.samplesOf(it) }
+        else DiveEntries.build(
+            dives = ds.dives,
+            settings = settings,
+            manualGroups = manualGroups,
+            deleted = deleted,
+            samplesOf = { ds.samplesOf(it) },
+            metaOf = { ds.metaOf(it) },
+            defaultGas = gasSettings.gas,
+        )
     }
 
     // 把「当前视图的合并归属 / 垃圾判定」物化回标记位，保证后台可查
@@ -175,13 +190,22 @@ fun DiveApp() {
         prefs.siThresholdS = s.siThresholdS
     }
 
+    fun applyDeco(d: DecoSettings) {
+        decoSettings = d
+        prefs.decoSettings = d
+    }
+
+    fun applyGas(g: GasSettings) {
+        gasSettings = g
+        prefs.gasSettings = g
+    }
+
     fun mergeSelected(selected: List<DiveEntry>) {
         if (selected.size < 2) return
         val files = selected.flatMap { e -> e.records.map { it.file } }
         scope.launch {
             repo.saveManualGroup(files, settings.siThresholdS)
-            manualGroups = withContext(Dispatchers.IO) { repo.manualGroups() }
-            data = repo.load(force = true)
+            reload()
         }
     }
 
@@ -190,30 +214,45 @@ fun DiveApp() {
             val members = entry.records.map { it.file }
             val gid = withContext(Dispatchers.IO) { repo.db.groupIdOf(members) }
             if (gid != null) repo.removeManualGroup(gid)
-            manualGroups = withContext(Dispatchers.IO) { repo.manualGroups() }
-            data = repo.load(force = true)
+            reload()
         }
     }
 
-    fun deleteEntries(ids: Set<String>) {
-        if (ids.isEmpty()) return
-        // 条目可能是合并组：删就把组内所有原始记录都打上软删除标记
-        val files = ids.flatMap { id ->
-            entries.firstOrNull { it.id == id }?.records?.map { it.file } ?: listOf(id)
-        }.toSet()
+    /** 收藏/取消收藏：作用于这条记录（合并组则整组）。 */
+    fun toggleFavorite(e: DiveEntry) {
+        val ids = e.records.map { it.file }
+        val already = ids.any { it in favorites }
+        scope.launch {
+            repo.setFavorite(ids, !already)
+            reload()
+        }
+    }
+
+    /** 软删除：只写 user_deleted，原始记录与原始字节都还在。 */
+    fun deleteEntries(targets: List<DiveEntry>) {
+        if (targets.isEmpty()) return
+        val files = targets.flatMap { e -> e.records.map { it.file } }.toSet()
         showCleanup = false
         scope.launch {
             repo.markDeleted(files, true)
-            data = repo.load(force = true)
+            reload()
             val res = snackbarHost.showSnackbar(
-                "已删除 ${ids.size} 组日志",
+                "已删除 ${targets.size} 组（数据仍在库里，可恢复）",
                 actionLabel = "撤销",
                 duration = SnackbarDuration.Long,
             )
             if (res == SnackbarResult.ActionPerformed) {
                 repo.markDeleted(files, false)
-                data = repo.load(force = true)
+                reload()
             }
+        }
+    }
+
+    fun setEntryGas(e: DiveEntry, o2: Double?, he: Double?) {
+        scope.launch {
+            // 合并组：整组标同一个气体（记录里本来就分不出是哪一段换的气）
+            for (r in e.records) repo.setGas(r.file, o2, he)
+            reload()
         }
     }
 
@@ -221,6 +260,9 @@ fun DiveApp() {
     if (openEntry != null) {
         DiveDetailScreen(
             entry = openEntry,
+            deco = decoSettings,
+            onDeco = { applyDeco(it) },
+            onGas = { o2, he -> setEntryGas(openEntry, o2, he) },
             onBack = { openId = null },
             canUnmerge = manualGroups.any { it.toSet() == openEntry.records.map { r -> r.file }.toSet() },
             onUnmerge = { unmerge(openEntry) },
@@ -253,7 +295,7 @@ fun DiveApp() {
             snackbarHost = { SnackbarHost(snackbarHost) },
             bottomBar = {
                 NavigationBar {
-                    TABS.forEachIndexed { i, (label, icon, _) ->
+                    TABS.forEachIndexed { i, (label, icon) ->
                         NavigationBarItem(
                             selected = tab == i,
                             onClick = { tab = i },
@@ -283,11 +325,11 @@ fun DiveApp() {
                     tab == 0 -> DiveListScreen(
                         entries = entries,
                         rawCount = ds.dives.size,
-                        settings = settings,
+                        favorites = favorites,
                         onOpen = { openId = it.id },
-                        onOpenMergeSettings = { showMergeDialog = true },
-                        onOpenCleanup = { showCleanup = true },
                         onMergeSelected = { mergeSelected(it) },
+                        onToggleFavorite = { toggleFavorite(it) },
+                        onDelete = { deleteEntries(listOf(it)) },
                     )
 
                     tab == 1 -> AnalysisScreen(
@@ -301,7 +343,7 @@ fun DiveApp() {
 
                     tab == 2 -> StatsScreen(entries)
 
-                    else -> DeviceScreen(
+                    tab == 3 -> DeviceScreen(
                         data = ds,
                         entries = entries,
                         deletedCount = deleted.size,
@@ -309,34 +351,64 @@ fun DiveApp() {
                         importing = importing,
                         repo = repo,
                         session = watchSession,
+                        defaultSyncMode = syncMode,
+                        pairedAddress = pairedAddress,
+                        pairedName = pairedName,
+                        onPaired = { addr, name ->
+                            pairedAddress = addr
+                            pairedName = name
+                            prefs.pairedAddress = addr
+                            prefs.pairedName = name
+                        },
                         onImport = { importLauncher.launch(arrayOf("*/*")) },
                         onClearImported = {
                             scope.launch {
                                 repo.clearImported()
-                                data = repo.load(force = true)
-                                importedCount = 0
+                                reload()
                                 snackbarHost.showSnackbar("已清空导入的日志")
                             }
                         },
-                        onSyncFinished = {
+                        onSyncFinished = { scope.launch { reload() } },
+                    )
+
+                    else -> SettingsScreen(
+                        data = ds,
+                        entries = entries,
+                        settings = settings,
+                        onSettings = { applySettings(it) },
+                        junkRule = junkRule,
+                        onJunkRule = {
+                            junkRule = it
+                            prefs.junkRule = it
+                        },
+                        deco = decoSettings,
+                        onDeco = { applyDeco(it) },
+                        gas = gasSettings,
+                        onGas = { applyGas(it) },
+                        syncMode = syncMode,
+                        onSyncMode = {
+                            syncMode = it
+                            prefs.syncMode = it
+                        },
+                        pairedName = pairedName,
+                        pairedAddress = pairedAddress,
+                        onForgetPaired = {
+                            prefs.forgetPaired()
+                            pairedAddress = null
+                            pairedName = null
+                        },
+                        deletedCount = deleted.size,
+                        onOpenCleanup = { showCleanup = true },
+                        onRestoreAll = {
                             scope.launch {
-                                data = repo.load(force = true)
-                                manualGroups = withContext(Dispatchers.IO) { repo.manualGroups() }
+                                repo.markDeleted(deleted, false)
+                                reload()
+                                snackbarHost.showSnackbar("已恢复 ${deleted.size} 条记录")
                             }
                         },
                     )
                 }
             }
-        }
-
-        if (showMergeDialog) {
-            MergeSettingsDialog(
-                entries = entries,
-                rawCount = data?.dives?.size ?: 0,
-                settings = settings,
-                onApply = { applySettings(it) },
-                onDismiss = { showMergeDialog = false },
-            )
         }
 
         if (showCleanup) {
@@ -348,11 +420,13 @@ fun DiveApp() {
                     junkRule = it
                     prefs.junkRule = it
                 },
-                onDelete = { deleteEntries(it) },
+                onDelete = { ids ->
+                    deleteEntries(entries.filter { it.id in ids })
+                },
                 onRestoreAll = {
                     scope.launch {
                         repo.markDeleted(deleted, false)
-                        data = repo.load(force = true)
+                        reload()
                     }
                 },
                 onDismiss = { showCleanup = false },

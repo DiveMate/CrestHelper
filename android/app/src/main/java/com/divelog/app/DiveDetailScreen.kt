@@ -8,12 +8,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -21,6 +21,7 @@ import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -28,13 +29,17 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import com.divelog.app.data.GasSource
+import kotlin.math.abs
 
 /**
  * 详情页：单次潜水的完整复盘。
@@ -47,20 +52,24 @@ import androidx.compose.ui.unit.dp
 @Composable
 fun DiveDetailScreen(
     entry: DiveEntry,
+    deco: DecoSettings,
+    onDeco: (DecoSettings) -> Unit,
+    onGas: (Double?, Double?) -> Unit,
     onBack: () -> Unit,
     canUnmerge: Boolean = false,
     onUnmerge: () -> Unit = {},
 ) {
-    var algoIdx by remember(entry.id) { mutableIntStateOf(2) }          // 默认 GF 50/70
-    val algo = Deco.ALGORITHMS[algoIdx]
-    val series = remember(entry.id, algoIdx) { Deco.series(entry.samples, algo) }
-    val analysis = remember(entry.id, algoIdx) {
-        Deco.analyzeProfile(entry.samples.map { it.t to it.depth }, algo)
+    val algo = deco.algorithm()
+    val series = remember(entry.id, deco, entry.gas) { Deco.series(entry.samples, algo, entry.gas) }
+    val analysis = remember(entry.id, deco, entry.gas) {
+        Deco.analyzeProfile(entry.samples.map { it.t to it.depth }, algo, entry.gas)
     }
     val ndlMin = series.minOfOrNull { it.ndl } ?: 0
     val ndlEnd = series.lastOrNull()?.ndl ?: 0
     val maxTemp = series.mapNotNull { it.temp }.maxOrNull() ?: entry.tempMaxC
     val minTemp = series.mapNotNull { it.temp }.minOrNull() ?: entry.tempMinC
+    var showGas by remember(entry.id) { mutableStateOf(false) }
+    var showGf by remember(entry.id) { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -94,23 +103,58 @@ fun DiveDetailScreen(
                 MetricCard("最大深度", entry.depthText, Modifier.weight(1f))
                 MetricCard("平均深度", entry.avgDepthText, Modifier.weight(1f))
             }
-            // 温度与采样
+            // 温度、气体与采样
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 MetricCard("最低水温", if (minTemp != null) "${Fmt.one(minTemp)} °C" else "—", Modifier.weight(1f))
                 MetricCard("最高水温", if (maxTemp != null) "${Fmt.one(maxTemp)} °C" else "—", Modifier.weight(1f))
                 MetricCard("采样点", "${entry.primary.nsamples}", Modifier.weight(1f))
             }
 
-            // 算法切换
-            Text("减压算法", style = MaterialTheme.typography.titleSmall)
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(Deco.ALGORITHMS) { a ->
-                    FilterChip(
-                        selected = a.id == algo.id,
-                        onClick = { algoIdx = Deco.ALGORITHMS.indexOf(a) },
-                        label = { Text(a.name) },
-                    )
+            // 气体：记录里没写就得靠人标，直接影响 NDL，所以放在最显眼的位置之一
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = if (entry.isNitrox) MaterialTheme.colorScheme.primaryContainer
+                    else MaterialTheme.colorScheme.surfaceVariant,
+                ),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Row(
+                    Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("呼吸气体", style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(
+                            entry.gasLabel,
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            when {
+                                entry.gasSource == GasSource.USER -> "你手动标的。改回「跟随记录」会让 NDL 按默认气体重算。"
+                                entry.gasSource == GasSource.RECORD -> "从原始记录里解析出来的。"
+                                entry.gasCount > 1 -> "记录里发现 ${entry.gasCount} 种气体，剖面末端的气体切换暂未按段切换计算。"
+                                else -> "这条记录没有气体信息（CR-4 老格式不存 FO2），按全局默认气体算。"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    TextButton(onClick = { showGas = true }) { Text("标注") }
                 }
+            }
+
+            // 减压算法：GF 直接可配，这里就地能改（跟设置页同一份值）
+            Text("减压算法", style = MaterialTheme.typography.titleSmall)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    algo.name,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = { showGf = true }) { Text("调整 GF") }
             }
             Text(algo.desc, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 
@@ -185,6 +229,189 @@ fun DiveDetailScreen(
             Spacer(Modifier.height(8.dp))
         }
     }
+
+    if (showGas) {
+        GasDialog(
+            current = entry.gas,
+            fromRecord = entry.gasSource == GasSource.RECORD,
+            onPick = { o2, he ->
+                onGas(o2, he)
+                showGas = false
+            },
+            onDismiss = { showGas = false },
+        )
+    }
+
+    if (showGf) {
+        GfDialog(
+            deco = deco,
+            onChange = onDeco,
+            onDismiss = { showGf = false },
+        )
+    }
+}
+
+/**
+ * 气体标注：直接填 O₂ / He 百分比。
+ *
+ * 常见的几档做成快捷入口（空气、EAN32、EAN36、Tx 21/35），
+ * 但主体是自由输入 —— 高氧比例本来就可能是 31.5% 这种非整数。
+ */
+@Composable
+private fun GasDialog(
+    current: Deco.Gas,
+    fromRecord: Boolean,
+    onPick: (Double?, Double?) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var o2Text by remember { mutableStateOf(GasSettings.pctText(current.o2)) }
+    var heText by remember { mutableStateOf(GasSettings.pctText(current.he)) }
+    val o2 = GasSettings.pctFromInput(o2Text)
+    val he = GasSettings.pctFromInput(heText) ?: 0.0
+    val valid = o2 != null && GasSettings.valid(o2, he)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("标注这次潜水的气体") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (fromRecord) {
+                    Text(
+                        "当前值来自原始记录；手动改会覆盖它，让这条按你填的算。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = o2Text,
+                        onValueChange = { if (it.all { c -> c.isDigit() || c == '.' } && it.count { c -> c == '.' } <= 1) o2Text = it },
+                        label = { Text("氧气 O₂") },
+                        suffix = { Text("%") },
+                        singleLine = true,
+                        isError = o2 == null || o2 !in 0.07..1.0,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.weight(1f),
+                    )
+                    OutlinedTextField(
+                        value = heText,
+                        onValueChange = { if (it.all { c -> c.isDigit() || c == '.' } && it.count { c -> c == '.' } <= 1) heText = it },
+                        label = { Text("氦气 He") },
+                        suffix = { Text("%") },
+                        singleLine = true,
+                        isError = he !in 0.0..0.95,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(
+                        "空气" to (0.21 to 0.0),
+                        "EAN32" to (0.32 to 0.0),
+                        "EAN36" to (0.36 to 0.0),
+                        "Tx 21/35" to (0.21 to 0.35),
+                    ).forEach { (label, pair) ->
+                        FilterChip(
+                            selected = o2 != null && abs((o2 ?: 0.0) - pair.first) < 1e-6 && abs(he - pair.second) < 1e-6,
+                            onClick = {
+                                o2Text = GasSettings.pctText(pair.first)
+                                heText = GasSettings.pctText(pair.second)
+                            },
+                            label = { Text(label) },
+                        )
+                    }
+                }
+                Text(
+                    if (valid) "按 ${gasName(Deco.Gas(o2!!, he))} 重算 NDL 与安全深度"
+                    else "氧气 7~100%，氦气 0~95%，两者之和不能超过 100%",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (valid) MaterialTheme.colorScheme.onSurfaceVariant
+                    else MaterialTheme.colorScheme.error,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = valid, onClick = { onPick(o2, he) }) { Text("应用") }
+        },
+        dismissButton = {
+            Row {
+                TextButton(onClick = { onPick(null, null) }) { Text("跟随记录") }
+                TextButton(onClick = onDismiss) { Text("取消") }
+            }
+        },
+    )
+}
+
+/** GF 就地调整：两个数字，合法才写回（跟设置页共享同一份持久化值）。 */
+@Composable
+private fun GfDialog(
+    deco: DecoSettings,
+    onChange: (DecoSettings) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var lowText by remember { mutableStateOf(DecoSettings.fmt(deco.gfLow)) }
+    var highText by remember { mutableStateOf(DecoSettings.fmt(deco.gfHigh)) }
+    val low = lowText.toDoubleOrNull()
+    val high = highText.toDoubleOrNull()
+    val valid = low != null && high != null && DecoSettings.valid(low, high)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("梯度余量 GF") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = lowText,
+                        onValueChange = { if (it.all { c -> c.isDigit() } && it.length <= 3) lowText = it },
+                        label = { Text("GF Low") },
+                        suffix = { Text("%") },
+                        singleLine = true,
+                        isError = low == null || low !in DecoSettings.MIN..DecoSettings.MAX,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.weight(1f),
+                    )
+                    OutlinedTextField(
+                        value = highText,
+                        onValueChange = { if (it.all { c -> c.isDigit() } && it.length <= 3) highText = it },
+                        label = { Text("GF High") },
+                        suffix = { Text("%") },
+                        singleLine = true,
+                        isError = high == null || high !in DecoSettings.MIN..DecoSettings.MAX,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                Text(
+                    if (valid) DecoSettings(low!!, high).describe()
+                    else "两个值都要在 10~100 之间，且 Low ≤ High",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (valid) MaterialTheme.colorScheme.onSurfaceVariant
+                    else MaterialTheme.colorScheme.error,
+                )
+                Text(
+                    "GF 越保守（值越小），NDL 越短、天花板越深。改完所有页面的数值一起变。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = valid,
+                onClick = {
+                    onChange(DecoSettings(low!!, high!!))
+                    onDismiss()
+                },
+            ) { Text("应用") }
+        },
+        dismissButton = {
+            Row {
+                TextButton(onClick = { onChange(DecoSettings(50.0, 70.0)); onDismiss() }) { Text("恢复 50/70") }
+                TextButton(onClick = onDismiss) { Text("取消") }
+            }
+        },
+    )
 }
 
 /** NDL 秒数 -> 展示文案。 */

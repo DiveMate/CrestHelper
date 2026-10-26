@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -33,6 +34,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.collectAsState
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -73,6 +75,11 @@ fun DeviceScreen(
     importing: Boolean = false,
     repo: DiveRepository,
     session: WatchSession,
+    /** 设置页里选的默认同步模式。 */
+    defaultSyncMode: SyncMode = SyncMode.AUTO,
+    pairedAddress: String? = null,
+    pairedName: String? = null,
+    onPaired: (address: String, name: String) -> Unit = { _, _ -> },
     onImport: () -> Unit = {},
     onClearImported: () -> Unit = {},
     onSyncFinished: () -> Unit = {},
@@ -126,6 +133,8 @@ fun DeviceScreen(
     var settings by remember { mutableStateOf<List<WatchSetting>>(emptyList()) }
     var message by remember { mutableStateOf<String?>(null) }
     var clockMessage by remember { mutableStateOf<String?>(null) }
+    // 配对成功后弹「要不要现在同步」——不让它默认就跑，几百条表能跑几分钟
+    var showSyncPrompt by remember { mutableStateOf(false) }
 
     fun scan() {
         if (scanning) return
@@ -154,26 +163,44 @@ fun DeviceScreen(
                 message = res.exceptionOrNull()?.message ?: "连接失败"
                 return@launch
             }
+            // 配对信息落库（地址用于下次直接连，不用再扫 8 秒）
+            val name = runCatching { device.name }.getOrNull() ?: pairedName ?: "CR-4"
+            onPaired(device.address, name)
             runCatching {
                 withContext(Dispatchers.IO) {
                     val sync = WatchSync(link, repo)
                     val info = sync.info()
-                    val plan = sync.makePlan(SyncMode.AUTO)
+                    val plan = sync.makePlan(defaultSyncMode)
                     Triple(info, plan, sync.settingsMatrix(info))
                 }
             }.onSuccess { (info, plan, matrix) ->
                 watchInfo = info
                 bundle = plan
                 settings = matrix
+                showSyncPrompt = true
             }.onFailure {
                 message = "读取设备信息失败：${it.message ?: it}"
+                // 设备信息读不出来也允许直接同步，避免卡在"不能同步也不能断开"
+                showSyncPrompt = true
             }
         }
+    }
+
+    /** 连已配对手表：地址存在 prefs 里，省掉每次扫描。 */
+    fun connectPaired() {
+        val addr = pairedAddress ?: return
+        val dev = runCatching { adapter?.getRemoteDevice(addr) }.getOrNull()
+        if (dev == null) {
+            message = "配对的地址无效（$addr），请重新扫描一次"
+            return
+        }
+        connectAndInspect(dev)
     }
 
     fun runSync(mode: SyncMode) {
         val link = session.link ?: return
         if (syncing) return
+        showSyncPrompt = false
         scope.launch {
             syncing = true
             progress = null
@@ -191,7 +218,7 @@ fun DeviceScreen(
                 runCatching {
                     withContext(Dispatchers.IO) {
                         val info = sync.info()
-                        val plan = sync.makePlan(SyncMode.AUTO)
+                        val plan = sync.makePlan(defaultSyncMode)
                         Triple(info, plan, sync.settingsMatrix(info))
                     }
                 }.onSuccess { (info, plan, matrix) ->
@@ -270,9 +297,9 @@ fun DeviceScreen(
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
                                 Button(
-                                    onClick = { runSync(SyncMode.AUTO) },
+                                    onClick = { runSync(defaultSyncMode) },
                                     modifier = Modifier.weight(1f),
-                                ) { Text("同步（自动）") }
+                                ) { Text("同步（${modeLabel(defaultSyncMode)}）") }
                                 OutlinedButton(
                                     onClick = { runSync(SyncMode.FULL) },
                                     modifier = Modifier.weight(1f),
@@ -324,9 +351,30 @@ fun DeviceScreen(
                     }
 
                     else -> {
+                        // 已配对手表：直接连，不用每次扫 8 秒
+                        if (pairedAddress != null) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("已配对：${pairedName ?: "CR-4"}", style = MaterialTheme.typography.bodyMedium)
+                                    Text(
+                                        pairedAddress,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                Button(
+                                    onClick = { if (permGranted) connectPaired() else launcher.launch(perms.toTypedArray()) },
+                                    enabled = btEnabled,
+                                ) { Text("连接") }
+                            }
+                            HorizontalDivider(Modifier.padding(vertical = 6.dp))
+                        }
                         Text(
-                            if (permGranted) "点下面扫描附近的手表（广播名 Crest-CR4）"
-                            else "需要蓝牙权限才能扫描",
+                            when {
+                                !permGranted -> "需要蓝牙权限才能扫描/连接"
+                                pairedAddress != null -> "换一块表，或者配对信息失效时，重新扫描一次"
+                                else -> "点下面扫描附近的手表（广播名 Crest-CR4）"
+                            },
                             style = MaterialTheme.typography.bodySmall,
                         )
                         Button(
@@ -454,6 +502,57 @@ fun DeviceScreen(
             }
         }
     }
+
+    // 配对成功后的选择：现在同步（增量/全量）还是稍后
+    if (showSyncPrompt) {
+        AlertDialog(
+            onDismissRequest = { showSyncPrompt = false },
+            title = { Text("手表已配对") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        watchInfo?.let { deviceLine(it) } ?: (pairedName ?: "CR-4"),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    bundle?.let { b ->
+                        Text(
+                            "建议：${if (b.plan.kind == PlanKind.UP_TO_DATE) "已是最新，无需同步" else "${modeLabel(defaultSyncMode)}，${b.plan.steps} 条"}",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                        Text(
+                            b.plan.reason,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Text(
+                        "不下载的话，本地数据不会变；随时可以在这一页再点同步。",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    enabled = !syncing,
+                    onClick = { runSync(defaultSyncMode) },
+                ) { Text("${modeLabel(defaultSyncMode)}同步") }
+            },
+            dismissButton = {
+                Row {
+                    TextButton(enabled = !syncing, onClick = { runSync(SyncMode.FULL) }) { Text("全量同步") }
+                    TextButton(onClick = { showSyncPrompt = false }) { Text("稍后") }
+                }
+            },
+        )
+    }
+}
+
+/** 同步模式的中文短名。 */
+private fun modeLabel(m: SyncMode): String = when (m) {
+    SyncMode.AUTO -> "自动"
+    SyncMode.INCREMENTAL -> "增量"
+    SyncMode.FULL -> "全量"
 }
 
 /** 同步计划的展示：为什么走全量/增量，要下多少条。 */
