@@ -16,8 +16,8 @@ set(CMAKE_C_STANDARD 99)
 if(DEFINED LDC_ROOT AND EXISTS "${LDC_ROOT}/src/parser.c")
     set(LDC "${LDC_ROOT}")
 else()
-    # cpp -> main -> src -> app -> android -> dive
-    get_filename_component(LDC_LOCAL "${CMAKE_CURRENT_SOURCE_DIR}/../../../../third_party/libdivecomputer" ABSOLUTE)
+    # cpp -> main -> src -> app -> android -> dive（5 层）才是仓库根
+    get_filename_component(LDC_LOCAL "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../third_party/libdivecomputer" ABSOLUTE)
     get_filename_component(LDC_SIBLING "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../libdivecomputer" ABSOLUTE)
     if(EXISTS "${LDC_LOCAL}/src/parser.c")
         set(LDC "${LDC_LOCAL}")
