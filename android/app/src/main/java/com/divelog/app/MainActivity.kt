@@ -47,6 +47,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.divelog.app.sync.WatchSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -90,6 +91,8 @@ fun DiveApp() {
     val ctx = LocalContext.current
     val prefs = remember { DivePrefs(ctx) }
     val repo = remember { DiveRepository(ctx) }
+    // BLE 连接要跨页保持（切 tab 不应该断线），所以会话放在这里而不是设备页内部
+    val watchSession = remember { WatchSession() }
     val scope = rememberCoroutineScope()
     val snackbarHost = remember { SnackbarHostState() }
 
@@ -99,8 +102,7 @@ fun DiveApp() {
 
     var settings by remember { mutableStateOf(prefs.settings) }
     var junkRule by remember { mutableStateOf(prefs.junkRule) }
-    var deleted by remember { mutableStateOf(prefs.deleted) }
-    var manualGroups by remember { mutableStateOf(prefs.manualGroups) }
+    var manualGroups by remember { mutableStateOf<List<List<String>>>(emptyList()) }
 
     var openId by remember { mutableStateOf<String?>(null) }
     var showMergeDialog by remember { mutableStateOf(false) }
@@ -110,7 +112,10 @@ fun DiveApp() {
 
     LaunchedEffect(Unit) {
         runCatching { repo.load() }
-            .onSuccess { data = it }
+            .onSuccess {
+                data = it
+                manualGroups = withContext(Dispatchers.IO) { repo.manualGroups() }
+            }
             .onFailure { error = it.message ?: it.toString() }
     }
 
@@ -135,20 +140,30 @@ fun DiveApp() {
                     return@launch
                 }
             data = repo.load(force = true)
-            importedCount = repo.imported.count()
+            importedCount = withContext(Dispatchers.IO) { repo.db.count("source <> ?", arrayOf("builtin")) }
             importing = false
             snackbarHost.showSnackbar(summary.text)
         }
     }
 
     LaunchedEffect(data) {
-        importedCount = withContext(Dispatchers.IO) { repo.imported.count() }
+        importedCount = withContext(Dispatchers.IO) { repo.db.count("source <> ?", arrayOf("builtin")) }
+    }
+
+    // 软删除标记直接来自元数据表（原始记录仍在库里，只是被标了 user_deleted）
+    val deleted = remember(data) {
+        data?.meta?.values?.filter { it.userDeleted }?.mapTo(HashSet()) { it.id } ?: emptySet<String>()
     }
 
     val entries = remember(data, settings, deleted, manualGroups) {
         val ds = data
         if (ds == null) emptyList()
         else DiveEntries.build(ds.dives, settings, manualGroups, deleted) { ds.samplesOf(it) }
+    }
+
+    // 把「当前视图的合并归属 / 垃圾判定」物化回标记位，保证后台可查
+    LaunchedEffect(entries, junkRule) {
+        if (entries.isNotEmpty()) runCatching { repo.materialize(entries, junkRule) }
     }
 
     val openEntry = openId?.let { id -> entries.firstOrNull { it.id == id } }
@@ -163,34 +178,41 @@ fun DiveApp() {
     fun mergeSelected(selected: List<DiveEntry>) {
         if (selected.size < 2) return
         val files = selected.flatMap { e -> e.records.map { it.file } }
-        manualGroups = manualGroups + listOf(files)
-        prefs.manualGroups = manualGroups
+        scope.launch {
+            repo.saveManualGroup(files, settings.siThresholdS)
+            manualGroups = withContext(Dispatchers.IO) { repo.manualGroups() }
+            data = repo.load(force = true)
+        }
     }
 
     fun unmerge(entry: DiveEntry) {
-        val files = entry.records.map { it.file }.toSet()
-        manualGroups = manualGroups.filterNot { it.toSet() == files }
-        prefs.manualGroups = manualGroups
+        scope.launch {
+            val members = entry.records.map { it.file }
+            val gid = withContext(Dispatchers.IO) { repo.db.groupIdOf(members) }
+            if (gid != null) repo.removeManualGroup(gid)
+            manualGroups = withContext(Dispatchers.IO) { repo.manualGroups() }
+            data = repo.load(force = true)
+        }
     }
 
     fun deleteEntries(ids: Set<String>) {
         if (ids.isEmpty()) return
-        // 条目可能是合并组：删就把组内所有原始记录都标记删除
+        // 条目可能是合并组：删就把组内所有原始记录都打上软删除标记
         val files = ids.flatMap { id ->
             entries.firstOrNull { it.id == id }?.records?.map { it.file } ?: listOf(id)
         }.toSet()
-        deleted = deleted + files
-        prefs.deleted = deleted
         showCleanup = false
         scope.launch {
+            repo.markDeleted(files, true)
+            data = repo.load(force = true)
             val res = snackbarHost.showSnackbar(
                 "已删除 ${ids.size} 组日志",
                 actionLabel = "撤销",
                 duration = SnackbarDuration.Long,
             )
             if (res == SnackbarResult.ActionPerformed) {
-                deleted = deleted - files
-                prefs.deleted = deleted
+                repo.markDeleted(files, false)
+                data = repo.load(force = true)
             }
         }
     }
@@ -285,6 +307,8 @@ fun DiveApp() {
                         deletedCount = deleted.size,
                         importedCount = importedCount,
                         importing = importing,
+                        repo = repo,
+                        session = watchSession,
                         onImport = { importLauncher.launch(arrayOf("*/*")) },
                         onClearImported = {
                             scope.launch {
@@ -292,6 +316,12 @@ fun DiveApp() {
                                 data = repo.load(force = true)
                                 importedCount = 0
                                 snackbarHost.showSnackbar("已清空导入的日志")
+                            }
+                        },
+                        onSyncFinished = {
+                            scope.launch {
+                                data = repo.load(force = true)
+                                manualGroups = withContext(Dispatchers.IO) { repo.manualGroups() }
                             }
                         },
                     )
@@ -320,8 +350,10 @@ fun DiveApp() {
                 },
                 onDelete = { deleteEntries(it) },
                 onRestoreAll = {
-                    deleted = emptySet()
-                    prefs.deleted = emptySet()
+                    scope.launch {
+                        repo.markDeleted(deleted, false)
+                        data = repo.load(force = true)
+                    }
                 },
                 onDismiss = { showCleanup = false },
             )

@@ -1,9 +1,19 @@
 package com.divelog.app
 
 import android.content.Context
+import com.divelog.app.data.AutoGroup
+import com.divelog.app.data.DiveDb
+import com.divelog.app.data.DiveMeta
+import com.divelog.app.data.DiveRow
+import com.divelog.app.data.DiveSource
+import com.divelog.app.data.FilterReason
+import com.divelog.app.data.SyncRunRecord
+import com.divelog.app.data.WatchProgress
+import com.divelog.app.data.WatchRecord
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.BufferedReader
+import java.io.File
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -42,8 +52,18 @@ data class Sample(val t: Int, val depth: Double, val temp: Double?)
 data class DiveDataSet(
     val dives: List<Dive>,
     val samples: Map<String, List<Sample>>,
+    /** 每条原始记录的元数据：来源 / 手表编号 / 合并归属 / 过滤标记。 */
+    val meta: Map<String, DiveMeta> = emptyMap(),
 ) {
     fun samplesOf(d: Dive): List<Sample> = samples[d.file] ?: emptyList()
+    fun metaOf(d: Dive): DiveMeta? = meta[d.file]
+
+    /** 被标为无效（垃圾/重复）的记录数；只统计，不影响展示。 */
+    val filteredCount: Int get() = meta.values.count { it.filterReason != null }
+    val mergedCount: Int get() = meta.values.count { it.isMerged }
+    val watchCount: Int get() = meta.values.count { it.source == DiveSource.WATCH }
+    val deletedCount: Int get() = meta.values.count { it.userDeleted }
+
     val totalSamples: Int get() = samples.values.sumOf { it.size }
     val totalSeconds: Long get() = dives.sumOf { it.divetimeS.toLong() }
     val maxDepth: Double get() = dives.maxOfOrNull { it.maxdepthM } ?: 0.0
@@ -98,45 +118,88 @@ object DiveCsv {
 }
 
 /**
- * 数据仓库：内置 assets（253 条真实日志）+ 用户导入的日志，首次加载后缓存在内存。
+ * 数据仓库。
  *
- * 导入的日志落在应用私有目录（见 [ImportedStore]），格式与 assets 的 CSV 同构，
- * 所以两者可以直接拼起来当成一份数据集用。
+ * 唯一的真源是 SQLite（[DiveDb]）：
+ *   - 首次启动时把 assets 内置数据 + 旧版 CSV 导入一次性 **seed** 进库；
+ *   - 之后无论文件导入还是手表下载，都只往库里写，CSV 不再参与运行时读写；
+ *   - 原始字节（.bin）仍然单独落盘到 `files/raw/`，库里只存路径——这样随时能重放解析，
+ *     而合并/过滤只改标记位，绝不动原始数据。
  */
 class DiveRepository(private val ctx: Context) {
 
-    val imported: ImportedStore = ImportedStore(java.io.File(ctx.filesDir, "imported"))
+    val db: DiveDb = DiveDb(ctx.applicationContext)
+
+    /** 旧版 CSV 导入目录：只在一次性迁移时读。 */
+    private val legacyStore = ImportedStore(File(ctx.filesDir, "imported"))
+    private val rawRoot = File(ctx.filesDir, "raw")
 
     @Volatile
     private var cached: DiveDataSet? = null
 
     suspend fun load(force: Boolean = false): DiveDataSet = withContext(Dispatchers.IO) {
         cached?.takeIf { !force }?.let { return@withContext it }
-        val builtinDives = ctx.assets.open("dives.csv").bufferedReader().use { DiveCsv.parseDives(it) }
-        val builtinSamples = ctx.assets.open("samples.csv").bufferedReader().use { DiveCsv.parseSamples(it) }
-        val extra = imported.load()
-        val dives = builtinDives + extra.dives
-        val samples = if (extra.samples.isEmpty()) builtinSamples else builtinSamples + extra.samples
-        // 默认按时间倒序（最近的在最上面）
-        val ds = DiveDataSet(dives.sortedByDescending { it.datetime }, samples)
+        seedIfNeeded()
+        val ds = DiveDataSet(
+            dives = db.allDives(),
+            samples = db.allSamples(),
+            meta = db.metaMap(),
+        )
         cached = ds
         ds
     }
 
+    /** 库为空时的一次性初始化：内置数据 + 旧 CSV + 旧设置里的删除/合并标记。 */
+    private fun seedIfNeeded() {
+        if (!db.isEmpty()) return
+        val now = System.currentTimeMillis()
+        val rows = ArrayList<DiveRow>(300)
+
+        val builtinSamples = ctx.assets.open("samples.csv").bufferedReader().use { DiveCsv.parseSamples(it) }
+        ctx.assets.open("dives.csv").bufferedReader().use { reader ->
+            for (d in DiveCsv.parseDives(reader)) {
+                rows.add(
+                    DiveRow(
+                        dive = d,
+                        samples = builtinSamples[d.file] ?: emptyList(),
+                        meta = DiveMeta(id = d.file, source = DiveSource.BUILTIN, importedAt = now),
+                    )
+                )
+            }
+        }
+
+        // 旧版本用 CSV 存导入记录，这里搬进库（文件保留不删，出问题能回退）
+        val legacy = legacyStore.load()
+        for (d in legacy.dives) {
+            rows.add(
+                DiveRow(
+                    dive = d,
+                    samples = legacy.samples[d.file] ?: emptyList(),
+                    meta = DiveMeta(id = d.file, source = DiveSource.FILE, importedAt = now),
+                )
+            )
+        }
+        db.insertAll(rows)
+
+        // 旧设置里的软删除/手动合并，迁成标记位
+        val prefs = DivePrefs(ctx)
+        if (prefs.deleted.isNotEmpty()) db.setUserDeleted(prefs.deleted, true)
+        for (g in prefs.manualGroups) runCatching { db.saveManualGroup(g) }
+    }
+
     /**
-     * 导入原始字节（CR-4 的 `.bin`，以后也可以是蓝牙下载到的字节）。
-     *
-     * 去重按 [DiveIngest.signature]：同一条潜水改个文件名再导一次也不会重复。
-     * 返回汇总，调用方据此提示用户；实际数据要再 `load(force = true)` 才刷新。
+     * 导入原始字节（CR-4 的 `.bin`，或任何符合该格式的字节流）。
+     * 去重按 [DiveIngest.signature]：同一条潜水改名再导一次不会重复。
      */
     suspend fun importBytes(files: List<ByteArray>): ImportSummary = withContext(Dispatchers.Default) {
-        val base = load()
-        val ids = base.dives.map { it.file }.toMutableSet()
-        val sigs = base.dives.map { DiveIngest.signature(it) }.toMutableSet()
-        var nextNo = (base.dives.maxOfOrNull { it.no } ?: 0) + 1
+        seedIfNeeded()
+        val ids = db.ids().toMutableSet()
+        val sigs = db.signatures()
+        var nextNo = db.maxDiveNo() + 1
         var added = 0
         var duplicate = 0
         var failed = 0
+        val rows = ArrayList<DiveRow>(files.size)
 
         for (bytes in files) {
             val parsed = DiveParser.parse(bytes)
@@ -150,20 +213,163 @@ class DiveRepository(private val ctx: Context) {
                 continue
             }
             val id = DiveIngest.idFor(parsed, ids)
-            imported.append(DiveIngest.toDive(parsed, id, nextNo++), DiveIngest.toSamples(parsed))
+            val dive = DiveIngest.toDive(parsed, id, nextNo++)
+            val rawPath = saveRaw(id, bytes)
+            rows.add(
+                DiveRow(
+                    dive = dive,
+                    samples = DiveIngest.toSamples(parsed),
+                    meta = DiveMeta(
+                        id = id,
+                        source = DiveSource.FILE,
+                        rawPath = rawPath,
+                        importedAt = System.currentTimeMillis(),
+                    ),
+                )
+            )
             ids += id
             sigs += sig
             added++
         }
+        db.insertAll(rows)
+        if (rows.isNotEmpty()) cached = null
         ImportSummary(added, duplicate, failed)
     }
 
-    /** 清空所有导入的日志（内置数据不受影响）。 */
-    suspend fun clearImported() = withContext(Dispatchers.IO) {
-        imported.clear()
+    /**
+     * 手表下载的一条记录入库（幂等）。
+     *
+     * 幂等键是 `(deviceId, watchIndex)`：
+     *  - 同一编号同一指纹 → [WatchIngest.SKIPPED]（增量同步重跑不会产生重复）
+     *  - 同一编号不同指纹 → 覆盖（设备重算/重写过的日志）
+     *  - 编号新但内容与已有记录一致 → [WatchIngest.DUPLICATE]（手表日志被清空重排过）
+     */
+    suspend fun ingestWatch(
+        deviceId: String,
+        watchIndex: Int,
+        fingerprint: String,
+        bytes: ByteArray,
+    ): WatchIngest = withContext(Dispatchers.Default) {
+        seedIfNeeded()
+        val parsed = DiveParser.parse(bytes)
+        if (parsed == null || parsed.divetime <= 0 || parsed.samples.isEmpty()) {
+            return@withContext WatchIngest.FAILED
+        }
+        val id = "watch_${deviceId}_$watchIndex"
+        val existing = db.metaMap()[id]
+        if (existing != null && existing.fingerprint == fingerprint) {
+            return@withContext WatchIngest.SKIPPED
+        }
+        val isUpdate = existing != null
+        if (!isUpdate && db.countBySignature(parsed.dateText, parsed.divetime, parsed.bytes.toLong(), id) > 0) {
+            return@withContext WatchIngest.DUPLICATE
+        }
+
+        val no = if (isUpdate) (db.allDives().firstOrNull { it.file == id }?.no ?: 0) else db.maxDiveNo() + 1
+        val dive = DiveIngest.toDive(parsed, id, no)
+        val rawPath = saveRaw(id, bytes)
+        db.insertAll(
+            listOf(
+                DiveRow(
+                    dive = dive,
+                    samples = DiveIngest.toSamples(parsed),
+                    meta = DiveMeta(
+                        id = id,
+                        source = DiveSource.WATCH,
+                        deviceId = deviceId,
+                        watchIndex = watchIndex,
+                        fingerprint = fingerprint,
+                        rawPath = rawPath,
+                        importedAt = System.currentTimeMillis(),
+                    ),
+                )
+            )
+        )
+        cached = null
+        if (isUpdate) WatchIngest.UPDATED else WatchIngest.ADDED
+    }
+
+    suspend fun markDeleted(ids: Collection<String>, deleted: Boolean) = withContext(Dispatchers.IO) {
+        db.setUserDeleted(ids, deleted)
         cached = null
     }
+
+    suspend fun saveManualGroup(memberIds: List<String>, siS: Int? = null): String? =
+        withContext(Dispatchers.IO) {
+            if (memberIds.size < 2) null
+            else {
+                cached = null
+                db.saveManualGroup(memberIds, siS)
+            }
+        }
+
+    suspend fun removeManualGroup(groupId: String) = withContext(Dispatchers.IO) {
+        db.removeManualGroup(groupId)
+        cached = null
+    }
+
+    fun manualGroups(): List<List<String>> = db.manualGroups()
+
+    /**
+     * 把当前视图的合并/过滤结果写回标记位。
+     * 幂等，可在数据或阈值变化后反复调用。
+     */
+    suspend fun materialize(entries: List<DiveEntry>, junkRule: JunkRule) = withContext(Dispatchers.IO) {
+        val manualKeys = manualGroups().map { it.toSet() }.toSet()
+        val groups = ArrayList<AutoGroup>()
+        val filters = HashMap<String, FilterReason>()
+        for (e in entries) {
+            val members = e.records.map { it.file }
+            if (members.size > 1 && members.toSet() !in manualKeys) {
+                groups.add(AutoGroup("auto_${members.first()}", members))
+            }
+            if (junkRule.matches(e)) {
+                for (m in members) filters[m] = FilterReason.JUNK
+            }
+        }
+        db.materialize(groups, filters)
+    }
+
+    /** 清空非内置数据（文件导入 + 手表下载）。 */
+    suspend fun clearImported() = withContext(Dispatchers.IO) {
+        db.clearSource(DiveSource.FILE)
+        db.clearSource(DiveSource.WATCH)
+        cached = null
+    }
+
+    /** 清空某一来源（同步页的「清空本机手表数据」用）。 */
+    suspend fun clearSource(source: DiveSource) = withContext(Dispatchers.IO) {
+        db.clearSource(source)
+        cached = null
+    }
+
+    fun watchProgress(deviceId: String): WatchProgress? = db.watchProgress(deviceId)
+
+    fun upsertWatch(w: WatchRecord) = db.upsertWatch(w)
+
+    fun watch(id: String): WatchRecord? = db.watch(id)
+
+    fun logSync(run: SyncRunRecord) = db.logSync(run)
+
+    fun lastSync(watchId: String): SyncRunRecord? = db.lastSync(watchId)
+
+    /** 原始字节落盘，返回相对 filesDir 的路径（库里只存这个）。 */
+    private fun saveRaw(id: String, bytes: ByteArray): String? = runCatching {
+        if (!rawRoot.exists()) rawRoot.mkdirs()
+        val f = File(rawRoot, "$id.bin")
+        f.writeBytes(bytes)
+        f.relativeTo(ctx.filesDir).path
+    }.getOrNull()
+
+    fun rawFile(id: String, rawPath: String?): File? {
+        val p = rawPath ?: "raw/$id.bin"
+        val f = File(ctx.filesDir, p)
+        return if (f.exists()) f else null
+    }
 }
+
+/** 单条手表记录的入库结果。 */
+enum class WatchIngest { ADDED, UPDATED, SKIPPED, DUPLICATE, FAILED }
 
 /** 统计聚合（纯函数，可单测）。 */
 object Analytics {
