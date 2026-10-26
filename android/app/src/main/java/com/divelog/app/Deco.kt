@@ -233,6 +233,22 @@ object Deco {
         Algorithm("gf20_60", "GF 20/60", 0.20, 0.60, "极保守，用于压力测试：看看最坏情况下有多少潜次会冒出减压义务。"),
     )
 
+    /**
+     * 按 GF 两个值现造一个算法档。
+     *
+     * 界面已经不再让人从 [ALGORITHMS] 里挑档位（挑不到 55/75 这种值），
+     * 但「多档位对拍」那一页仍然需要离散的样本来对比，所以两套并存。
+     */
+    fun algorithmFor(gfLow: Double, gfHigh: Double): Algorithm = Algorithm(
+        id = "gf_${(gfLow * 100).toInt()}_${(gfHigh * 100).toInt()}",
+        name = "GF ${pctInt(gfLow)}/${pctInt(gfHigh)}",
+        gfLow = gfLow,
+        gfHigh = gfHigh,
+        desc = "",
+    )
+
+    private fun pctInt(v: Double): String = Math.round(v * 100).toString()
+
     /** 一条潜水的分析结果。 */
     data class ProfileAnalysis(
         val gf99Max: Double,

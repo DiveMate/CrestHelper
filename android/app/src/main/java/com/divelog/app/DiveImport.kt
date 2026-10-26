@@ -70,7 +70,14 @@ object DiveIngest {
     )
 
     fun toSamples(p: DiveParser.Dive): List<Sample> =
-        p.samples.map { Sample(it.t, it.depth, it.temp) }
+        p.samples.map { Sample(it.t, it.depth, it.temp, it.gas) }
+
+    /**
+     * 记录里自带的气体 -> 元数据字段。没有气体信息时返回 null（交给上层按默认气体算）。
+     * CR-4 的 v0 记录格式不带气体（实测 294/294），所以这里通常是 null。
+     */
+    fun recordGas(p: DiveParser.Dive): Pair<Double, Double>? =
+        p.primaryGas?.let { it.o2 to it.he }
 }
 
 /**

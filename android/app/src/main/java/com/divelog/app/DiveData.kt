@@ -7,6 +7,7 @@ import com.divelog.app.data.DiveMeta
 import com.divelog.app.data.DiveRow
 import com.divelog.app.data.DiveSource
 import com.divelog.app.data.FilterReason
+import com.divelog.app.data.GasSource
 import com.divelog.app.data.SyncRunRecord
 import com.divelog.app.data.WatchProgress
 import com.divelog.app.data.WatchRecord
@@ -17,6 +18,7 @@ import java.io.File
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
+import kotlin.math.abs
 
 /**
  * 数据层：把桌面端解析好的真实潜水数据（data/dives.csv + samples.csv）
@@ -46,13 +48,13 @@ data class Dive(
 }
 
 /** 一个采样点。temperature 可能缺失（原始设备未记录）。 */
-data class Sample(val t: Int, val depth: Double, val temp: Double?)
+data class Sample(val t: Int, val depth: Double, val temp: Double?, val gas: Int? = null)
 
 /** 全量数据集。 */
 data class DiveDataSet(
     val dives: List<Dive>,
     val samples: Map<String, List<Sample>>,
-    /** 每条原始记录的元数据：来源 / 手表编号 / 合并归属 / 过滤标记。 */
+    /** 每条原始记录的元数据：来源 / 手表编号 / 合并归属 / 过滤标记 / 收藏 / 气体。 */
     val meta: Map<String, DiveMeta> = emptyMap(),
 ) {
     fun samplesOf(d: Dive): List<Sample> = samples[d.file] ?: emptyList()
@@ -63,6 +65,10 @@ data class DiveDataSet(
     val mergedCount: Int get() = meta.values.count { it.isMerged }
     val watchCount: Int get() = meta.values.count { it.source == DiveSource.WATCH }
     val deletedCount: Int get() = meta.values.count { it.userDeleted }
+    val favoriteCount: Int get() = meta.values.count { it.favorite }
+
+    /** 记录里自带的、可用的气体（v0 格式记录没有，所以通常是空）。 */
+    val gasFromRecords: Int get() = meta.values.count { it.gasSource == GasSource.RECORD }
 
     val totalSamples: Int get() = samples.values.sumOf { it.size }
     val totalSeconds: Long get() = dives.sumOf { it.divetimeS.toLong() }
@@ -200,6 +206,9 @@ class DiveRepository(private val ctx: Context) {
         var duplicate = 0
         var failed = 0
         val rows = ArrayList<DiveRow>(files.size)
+        // 记录自带的气体要在插入后再补写（insertAll 的列清单里没有它，
+        // 因为它是"可选、可能为空"的派生信息，单独 UPDATE 更省事也更安全）
+        val gasPatches = ArrayList<Triple<String, Double, Double>>(files.size)
 
         for (bytes in files) {
             val parsed = DiveParser.parse(bytes)
@@ -229,9 +238,11 @@ class DiveRepository(private val ctx: Context) {
             )
             ids += id
             sigs += sig
+            DiveIngest.recordGas(parsed)?.let { (o2, he) -> gasPatches.add(Triple(id, o2, he)) }
             added++
         }
         db.insertAll(rows)
+        for ((id, o2, he) in gasPatches) db.setRecordGas(id, o2, he)
         if (rows.isNotEmpty()) cached = null
         ImportSummary(added, duplicate, failed)
     }
@@ -286,6 +297,7 @@ class DiveRepository(private val ctx: Context) {
             )
         )
         cached = null
+        DiveIngest.recordGas(parsed)?.let { (o2, he) -> db.setRecordGas(id, o2, he) }
         if (isUpdate) WatchIngest.UPDATED else WatchIngest.ADDED
     }
 
@@ -293,6 +305,26 @@ class DiveRepository(private val ctx: Context) {
         db.setUserDeleted(ids, deleted)
         cached = null
     }
+
+    /** 收藏 / 取消收藏。只改标记，不动数据。 */
+    suspend fun setFavorite(ids: Collection<String>, favorite: Boolean) = withContext(Dispatchers.IO) {
+        db.setFavorite(ids, favorite)
+        cached = null
+    }
+
+    /**
+     * 手动标注气体。传 null 清除标注（回到"按默认气体算"）。
+     * 会同步更新采样点上的气体下标，剖面图的分段着色才跟得上。
+     */
+    suspend fun setGas(id: String, o2: Double?, he: Double? = null) = withContext(Dispatchers.IO) {
+        db.setGas(id, o2, he)
+        cached = null
+    }
+
+    /** 回收站：所有被软删除的记录 id（原始数据仍在库里）。 */
+    suspend fun deletedIds(): Set<String> = withContext(Dispatchers.IO) { db.deletedIds() }
+
+    suspend fun favoriteIds(): Set<String> = withContext(Dispatchers.IO) { db.favoriteIds() }
 
     suspend fun saveManualGroup(memberIds: List<String>, siS: Int? = null): String? =
         withContext(Dispatchers.IO) {
@@ -487,4 +519,10 @@ object Fmt {
 
     /** 坐标轴时间标签：秒 -> "12'" */
     fun axisMinutes(sec: Int): String = "${sec / 60}'"
+
+    /** 数值 -> 输入框初始文本（整数不带小数点）。 */
+    fun input(v: Double): String {
+        val r = Math.round(v).toDouble()
+        return if (abs(v - r) < 1e-9) r.toInt().toString() else v.toString()
+    }
 }

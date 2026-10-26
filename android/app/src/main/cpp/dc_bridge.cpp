@@ -1,10 +1,12 @@
 /* JNI 桥接：把 libdivecomputer 的 deepsix_excursion 解析能力暴露给 Kotlin。
  *
- * 设计取舍：Kotlin 侧用 btleplug 负责 BLE 扫描/连接/下载原始字节，
+ * 设计取舍：BLE 扫描/连接/下载由 Kotlin 侧的 BluetoothGatt 负责，
  * 本 .so 只负责「原始字节 -> 结构化 dive 数据」的解析（对应 parse_cr4 的能力），
  * 因此不编设备层/传输层（descriptor/usb/ble/bluetooth…），大幅简化交叉编译。
  *
  * 输出用 JSON 字符串（手工拼接），Kotlin 侧用 org.json 解析。
+ * 气体（FO2/He）与气体切换只有遍历采样时才会被解析器发现，所以 gas 字段
+ * 必须在 samples_foreach 之后读取 —— 顺序错了就永远是空的。
  */
 #include <jni.h>
 #include <android/log.h>
@@ -54,11 +56,15 @@ typedef struct {
     double cur_temp;
     int have_temp;
     unsigned int count;
+    /* 气体：mix 索引由 DC_SAMPLE_GASMIX 事件推进；ngas==0 表示这份记录没带气体信息
+     *（CR-4 的 v0 记录格式就是这样，实测 294 份样本全部如此）。 */
+    unsigned int cur_mix;
+    int have_mix;
 } samples_t;
 
 static void sample_cb(dc_sample_type_t type, const dc_sample_value_t *value, void *userdata) {
     samples_t *acc = (samples_t *) userdata;
-    char tmp[160];
+    char tmp[200];
     switch (type) {
     case DC_SAMPLE_TIME:
         acc->cur_time = value->time;
@@ -67,9 +73,15 @@ static void sample_cb(dc_sample_type_t type, const dc_sample_value_t *value, voi
         acc->cur_depth = value->depth;
         sb_add(&acc->sb, acc->first ? "[" : ",");
         acc->first = 0;
-        if (acc->have_temp)
+        if (acc->have_temp && acc->have_mix)
+            snprintf(tmp, sizeof tmp, "{\"t\":%u,\"depth\":%.3f,\"temp\":%.2f,\"g\":%u}",
+                     acc->cur_time / 1000, acc->cur_depth, acc->cur_temp, acc->cur_mix);
+        else if (acc->have_temp)
             snprintf(tmp, sizeof tmp, "{\"t\":%u,\"depth\":%.3f,\"temp\":%.2f}",
                      acc->cur_time / 1000, acc->cur_depth, acc->cur_temp);
+        else if (acc->have_mix)
+            snprintf(tmp, sizeof tmp, "{\"t\":%u,\"depth\":%.3f,\"g\":%u}",
+                     acc->cur_time / 1000, acc->cur_depth, acc->cur_mix);
         else
             snprintf(tmp, sizeof tmp, "{\"t\":%u,\"depth\":%.3f}",
                      acc->cur_time / 1000, acc->cur_depth);
@@ -79,6 +91,10 @@ static void sample_cb(dc_sample_type_t type, const dc_sample_value_t *value, voi
     case DC_SAMPLE_TEMPERATURE:
         acc->cur_temp = value->temperature;
         acc->have_temp = 1;
+        break;
+    case DC_SAMPLE_GASMIX:
+        acc->cur_mix = value->gasmix;
+        acc->have_mix = 1;
         break;
     default:
         break;
@@ -149,8 +165,6 @@ Java_com_divelog_app_DiveParser_nativeParseDive(JNIEnv *env, jobject /*thiz*/, j
     dc_parser_get_field(parser, DC_FIELD_MAXDEPTH, 0, &maxdepth);
     double tmin = 0.0;
     dc_parser_get_field(parser, DC_FIELD_TEMPERATURE_MINIMUM, 0, &tmin);
-    unsigned int ngas = 0;
-    dc_parser_get_field(parser, DC_FIELD_GASMIX_COUNT, 0, &ngas);
 
     dc_datetime_t dt;
     memset(&dt, 0, sizeof dt);
@@ -160,10 +174,31 @@ Java_com_divelog_app_DiveParser_nativeParseDive(JNIEnv *env, jobject /*thiz*/, j
     samples_t acc;
     sb_init(&acc.sb);
     acc.first = 1; acc.cur_time = 0; acc.cur_depth = 0; acc.cur_temp = 0;
-    acc.have_temp = 0; acc.count = 0;
+    acc.have_temp = 0; acc.count = 0; acc.cur_mix = 0; acc.have_mix = 0;
     dc_parser_samples_foreach(parser, sample_cb, &acc);
     if (acc.first) sb_add(&acc.sb, "[]");           /* 空数组 */
     else sb_add(&acc.sb, "]");
+
+    /* 气体表必须**在采样遍历之后**读：deepsix 解析器是在遍历过程中
+     * 遇到气体切换事件时才把 mix 填进 parser->gasmix[] 的（见
+     * deepsix_excursion_parser.c 的 EVENT_CHANGE_GAS 分支）。
+     * 之前在这里提前读 gasmixCount，永远得到 0。 */
+    unsigned int ngas = 0;
+    dc_parser_get_field(parser, DC_FIELD_GASMIX_COUNT, 0, &ngas);
+
+    sb_t gas;
+    sb_init(&gas);
+    sb_add(&gas, "[");
+    for (unsigned int i = 0; i < ngas; i++) {
+        dc_gasmix_t g;
+        memset(&g, 0, sizeof g);
+        if (dc_parser_get_field(parser, DC_FIELD_GASMIX, i, &g) != DC_STATUS_SUCCESS) continue;
+        char tmp[96];
+        snprintf(tmp, sizeof tmp, "%s{\"o2\":%.4f,\"he\":%.4f}",
+                 i ? "," : "", g.oxygen, g.helium);
+        sb_add(&gas, tmp);
+    }
+    sb_add(&gas, "]");
 
     /* 又一个防御：全零/纯垃圾数据可能让 libdc "解析成功" 但一条采样都没有、
      * 时长也是 0。这种空记录对上层毫无意义（后续过滤规则也会丢弃），
@@ -171,6 +206,7 @@ Java_com_divelog_app_DiveParser_nativeParseDive(JNIEnv *env, jobject /*thiz*/, j
     if (acc.count == 0 && divetime == 0) {
         LOGE("parseDive: no usable data (samples=0, divetime=0) -> invalid");
         sb_free(&acc.sb);
+        sb_free(&gas);
         dc_parser_destroy(parser);
         dc_context_free(ctx);
         free(buf);
@@ -198,17 +234,21 @@ Java_com_divelog_app_DiveParser_nativeParseDive(JNIEnv *env, jobject /*thiz*/, j
         sb_add(&out, "null");
     }
 
+    sb_add(&out, ",\"gas\":");
+    sb_add(&out, gas.buf ? gas.buf : "[]");
+
     sb_add(&out, ",\"samples\":");
     if (out.buf && acc.sb.buf) sb_add(&out, acc.sb.buf);
     else sb_add(&out, "[]");
     sb_add(&out, "}");
 
-    LOGI("parseDive: ok, %u samples, divetime=%u, maxdepth=%.2f",
-         acc.count, divetime, maxdepth);
+    LOGI("parseDive: ok, %u samples, divetime=%u, maxdepth=%.2f, ngas=%u",
+         acc.count, divetime, maxdepth, ngas);
 
     jstring result = env->NewStringUTF(out.buf ? out.buf : "{\"ok\":false,\"error\":\"build failed\"}");
 
     sb_free(&out);
+    sb_free(&gas);
     sb_free(&acc.sb);
     dc_parser_destroy(parser);
     dc_context_free(ctx);

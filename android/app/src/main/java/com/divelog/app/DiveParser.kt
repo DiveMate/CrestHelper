@@ -6,14 +6,33 @@ import org.json.JSONObject
  * libdc (libdivecomputer) JNI 包装：把下载到的原始 dive 字节解析成结构化数据。
  *
  * .so 由 NDK 从 libdivecomputer 的 deepsix_excursion 解析器交叉编译而来
- *（只含解析能力，不含传输层；BLE 扫描/下载由 btleplug 在 Kotlin 侧完成）。
+ *（只含解析能力，不含传输层；BLE 扫描/下载由 Kotlin 侧 BluetoothGatt 完成）。
  *
  * 分层说明：为了让 JVM 单元测试（无设备）也能覆盖 JSON→模型的转换，
  * 解析逻辑放在 [fromJson] 这一层（纯 Kotlin），native 调用只负责产 JSON。
  */
 object DiveParser {
 
-    data class Sample(val t: Int, val depth: Double, val temp: Double?)
+    /**
+     * 采样点。[gas] 是该时刻正在呼吸的气体在 [Dive.gases] 里的下标；
+     * 记录本身没带气体信息时为 null（CR-4 的 v0 格式就是这样）。
+     */
+    data class Sample(val t: Int, val depth: Double, val temp: Double?, val gas: Int? = null)
+
+    /** 一种呼吸气体，o2/he 是体积分数（0.32 = EAN32）。 */
+    data class Gas(val o2: Double, val he: Double = 0.0) {
+        val n2: Double get() = (1.0 - o2 - he).coerceAtLeast(0.0)
+        val isNitrox: Boolean get() = o2 > 0.215
+        val label: String
+            get() = when {
+                he > 0.001 -> "Tx ${pct(o2)}/${pct(he)}"
+                o2 > 0.995 -> "纯氧"
+                isNitrox -> "EAN${pct(o2)}"
+                else -> "空气"
+            }
+
+        private fun pct(v: Double) = Math.round(v * 100).toString()
+    }
 
     data class Dive(
         val bytes: Int,
@@ -24,10 +43,15 @@ object DiveParser {
         val sampleCount: Int,
         val year: Int, val month: Int, val day: Int,
         val hour: Int, val minute: Int, val second: Int,
-        val samples: List<Sample>
+        val samples: List<Sample>,
+        /** 记录里带的气体表；空表示这份记录没写气体（此时无法判断是否高氧）。 */
+        val gases: List<Gas> = emptyList(),
     ) {
         val dateText: String get() = "%04d-%02d-%02d %02d:%02d:%02d".format(year, month, day, hour, minute, second)
         val durationText: String get() = "%d:%02d".format(divetime / 60, divetime % 60)
+
+        /** 主力气体：出现在剖面里的第一种；没有气体信息时为 null。 */
+        val primaryGas: Gas? get() = gases.firstOrNull()
     }
 
     /** .so 是否成功加载。加载失败不抛异常，界面据此降级显示。 */
@@ -68,8 +92,17 @@ object DiveParser {
                     samples.add(Sample(
                         t = e.getInt("t"),
                         depth = e.getDouble("depth"),
-                        temp = if (e.has("temp") && !e.isNull("temp")) e.getDouble("temp") else null
+                        temp = if (e.has("temp") && !e.isNull("temp")) e.getDouble("temp") else null,
+                        gas = if (e.has("g") && !e.isNull("g")) e.getInt("g") else null,
                     ))
+                }
+            }
+            val garr = o.optJSONArray("gas")
+            val gases = ArrayList<Gas>(garr?.length() ?: 0)
+            if (garr != null) {
+                for (i in 0 until garr.length()) {
+                    val e = garr.getJSONObject(i)
+                    gases.add(Gas(e.optDouble("o2", 0.21), e.optDouble("he", 0.0)))
                 }
             }
             Dive(
@@ -85,7 +118,8 @@ object DiveParser {
                 hour = dt?.optInt("hour") ?: 0,
                 minute = dt?.optInt("minute") ?: 0,
                 second = dt?.optInt("second") ?: 0,
-                samples = samples
+                samples = samples,
+                gases = gases,
             )
         }.getOrNull()
     }

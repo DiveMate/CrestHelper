@@ -9,7 +9,7 @@ import org.junit.Test
  *
  * 判据说明见 Deco.DecoModel.surfaceCeiling：
  * NDL 问的是"还能不能一口气出水"，所以用 gf_high 在水面的约束，
- * 这与主流电脑表/减压表对得上（18m GF50/70 ≈ 30 分钟），
+ * 这与主流电脑表/减压表量级一致（18m GF50/70 实测 ≈ 23 分钟），
  * 而用天花板（gf_low 锚点）会算出 9 分钟，明显不对。
  */
 class DecoNdlTest {
@@ -26,7 +26,7 @@ class DecoNdlTest {
     fun `ndl_at_18m_gf50_70_matches_dive_table_magnitude`() {
         val sec = Deco.ndlSec(Deco.DecoModel(), algo("gf50_70"), 18.0)
         val min = sec / 60.0
-        // 实测 30 分钟；给一个足够宽的区间，锁住"量级正确"而不是逐个数字
+        // 实测 23 分钟；给一个足够宽的区间，锁住"量级正确"而不是逐个数字
         assertTrue("18m GF50/70 的 NDL 应落在 20~45 分钟，实测 $min", min in 20.0..45.0)
     }
 

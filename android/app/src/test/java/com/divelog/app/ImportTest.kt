@@ -171,9 +171,11 @@ class ImportTest {
 
         val ds = store.load()
         // 间隔 10 分钟（600s）<= 阈值 => 应合并成 1 组
-        val entries = DiveEntries.build(ds.dives, DiveSettings(autoMerge = true, siThresholdS = 600)) {
-            ds.samplesOf(it)
-        }
+        val entries = DiveEntries.build(
+            ds.dives,
+            DiveSettings(autoMerge = true, siThresholdS = 600),
+            samplesOf = { ds.samplesOf(it) },
+        )
         assertEquals(1, entries.size)
         assertEquals(2, entries[0].mergedCount)
         assertEquals(1200, entries[0].bottomTimeS)

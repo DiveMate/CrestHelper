@@ -31,9 +31,19 @@ data class DiveMeta(
     /** 原始字节落盘路径（相对 filesDir），用于「重新解析」。 */
     val rawPath: String? = null,
     val importedAt: Long = 0L,
+    /** 收藏标记（用户手标，纯标记不改数据）。 */
+    val favorite: Boolean = false,
+    /** 呼吸气氧分率（0.32 = EAN32）；null 表示不知道。 */
+    val gasO2: Double? = null,
+    /** 氦分率（三混气才有，休闲潜水一般是 0）。 */
+    val gasHe: Double? = null,
+    /** 气体值的来源。null = 没有值，按「全局默认气体」算。 */
+    val gasSource: GasSource? = null,
 ) {
     val isMerged: Boolean get() = groupId != null && mergeKind != MergeKind.NONE
     val isFiltered: Boolean get() = filterReason != null
+    val isNitrox: Boolean get() = (gasO2 ?: 0.0) > 0.215
+
     /** 界面上给这条记录打的角标；null 表示不需要角标。 */
     val badge: String?
         get() = when {
@@ -43,6 +53,25 @@ data class DiveMeta(
             mergeKind == MergeKind.AUTO -> "自动合并"
             else -> null
         }
+}
+
+/**
+ * 气体值的来源。
+ *
+ * CR-4 的 v0 记录格式不带气体信息（实测 294 份样本全部如此），
+ * 所以「那条潜水到底是不是高氧」只能靠用户标注；标注过的值优先级最高，
+ * 记录里真带了气体时（新固件 / 别的表）则用记录的。
+ */
+enum class GasSource(val code: String, val label: String) {
+    /** 从原始记录里解析出来的（有气体切换事件才拿得到）。 */
+    RECORD("record", "记录"),
+    /** 用户手动标注的。 */
+    USER("user", "手动"),
+    ;
+
+    companion object {
+        fun of(code: String?): GasSource? = entries.firstOrNull { it.code == code }
+    }
 }
 
 enum class DiveSource(val code: String) {

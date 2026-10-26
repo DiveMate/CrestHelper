@@ -47,7 +47,11 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
                 group_id      TEXT,
                 merge_kind    TEXT NOT NULL DEFAULT 'none',
                 filter_reason TEXT,
-                user_deleted  INTEGER NOT NULL DEFAULT 0
+                user_deleted  INTEGER NOT NULL DEFAULT 0,
+                favorite      INTEGER NOT NULL DEFAULT 0,
+                gas_o2        REAL,
+                gas_he        REAL,
+                gas_src       TEXT
             )
             """.trimIndent()
         )
@@ -118,7 +122,13 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        // v1 是首个版本；后续加字段在这里按版本迁移，不要 DELETE 数据。
+        // v1 -> v2：加收藏、气体三列。**不重建表、不删数据**，只 ALTER 补列。
+        if (oldVersion < 2) {
+            db.execSQL("ALTER TABLE dive ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0")
+            db.execSQL("ALTER TABLE dive ADD COLUMN gas_o2 REAL")
+            db.execSQL("ALTER TABLE dive ADD COLUMN gas_he REAL")
+            db.execSQL("ALTER TABLE dive ADD COLUMN gas_src TEXT")
+        }
     }
 
     // ------------------------------------------------------------------ 写入
@@ -144,18 +154,38 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
                 INSERT OR REPLACE INTO dive
                 (id, source, device_id, watch_index, fingerprint, dive_no, datetime, divetime_s,
                  maxdepth_m, temp_min_c, nsamples, bytes, raw_path, imported_at,
-                 group_id, merge_kind, filter_reason, user_deleted)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 group_id, merge_kind, filter_reason, user_deleted, favorite,
+                 gas_o2, gas_he, gas_src)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """.trimIndent()
             )
             val sSql = db.compileStatement(
                 "INSERT OR REPLACE INTO sample (dive_id, t, depth, temp) VALUES (?,?,?,?)"
             )
             val delS = db.compileStatement("DELETE FROM sample WHERE dive_id = ?")
-
+            /* 重同步同一条记录时，用户手动打的标记不能被新解析结果抹掉：
+             * 收藏、手动标注的气体、软删除、手动合并组都属于「用户意图」，
+             * 覆盖前先把旧值读出来。漏了这一步，重连一次手表收藏就全没了。 */
             for (r in rows) {
                 val d = r.dive
-                val m = r.meta
+                var m = r.meta
+                val old = oldMarkers(db, d.file)
+                if (old != null) {
+                    /* 气体：用户标注必须压过记录自带的值。
+                     * 判据是"旧值是不是用户标的"，而不是"新值是不是空的" ——
+                     * 手表重下这条记录时新值里一定带着 RECORD 气体，
+                     * 只看非空会被它盖掉。 */
+                    val userGasWins = old.gasSource == GasSource.USER
+                    m = m.copy(
+                        favorite = m.favorite || old.favorite,
+                        gasO2 = if (userGasWins) old.gasO2 else (m.gasO2 ?: old.gasO2),
+                        gasHe = if (userGasWins) old.gasHe else (m.gasHe ?: old.gasHe),
+                        gasSource = if (userGasWins) GasSource.USER else (m.gasSource ?: old.gasSource),
+                        userDeleted = m.userDeleted || old.userDeleted,
+                        groupId = m.groupId ?: old.groupId,
+                        mergeKind = if (m.mergeKind != MergeKind.NONE) m.mergeKind else old.mergeKind,
+                    )
+                }
                 dSql.clearBindings()
                 dSql.bindString(1, d.file)
                 dSql.bindString(2, m.source.code)
@@ -175,6 +205,10 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
                 dSql.bindString(16, m.mergeKind.code)
                 bindNullableText(dSql, 17, m.filterReason?.code)
                 dSql.bindLong(18, if (m.userDeleted) 1 else 0)
+                dSql.bindLong(19, if (m.favorite) 1 else 0)
+                bindNullableDouble(dSql, 20, m.gasO2)
+                bindNullableDouble(dSql, 21, m.gasHe)
+                bindNullableText(dSql, 22, m.gasSource?.code)
                 dSql.executeInsert()
 
                 delS.bindString(1, d.file)
@@ -212,6 +246,53 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
             db.endTransaction()
         }
     }
+
+    /** 收藏 / 取消收藏（纯标记）。 */
+    fun setFavorite(ids: Collection<String>, favorite: Boolean) {
+        if (ids.isEmpty()) return
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            val st = db.compileStatement("UPDATE dive SET favorite = ? WHERE id = ?")
+            for (id in ids) {
+                st.clearBindings()
+                st.bindLong(1, if (favorite) 1 else 0)
+                st.bindString(2, id)
+                st.executeUpdateDelete()
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    /**
+     * 手动标注一条记录的气体（FO2/He，传 null 表示清除标注）。
+     * 只改标记，不动原始字节，所以随时可改回。
+     */
+    fun setGas(id: String, o2: Double?, he: Double? = null) {
+        if (o2 == null) {
+            writableDatabase.execSQL(
+                "UPDATE dive SET gas_o2 = NULL, gas_he = NULL, gas_src = NULL WHERE id = ?",
+                arrayOf<Any?>(id)
+            )
+        } else {
+            writableDatabase.execSQL(
+                "UPDATE dive SET gas_o2 = ?, gas_he = ?, gas_src = ? WHERE id = ?",
+                arrayOf<Any?>(o2, he ?: 0.0, GasSource.USER.code, id)
+            )
+        }
+    }
+
+    /** 记录里自带的气体（只写 record 来源，不覆盖用户标注）。 */
+    fun setRecordGas(id: String, o2: Double, he: Double) {
+        writableDatabase.execSQL(
+            "UPDATE dive SET gas_o2 = ?, gas_he = ?, gas_src = ? " +
+                "WHERE id = ? AND (gas_src IS NULL OR gas_src = ?)",
+            arrayOf<Any?>(o2, he, GasSource.RECORD.code, id, GasSource.RECORD.code)
+        )
+    }
+
 
     /**
      * 把手动合并组写进库里（权威数据）。
@@ -370,7 +451,7 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
         val out = HashMap<String, DiveMeta>(512)
         readableDatabase.rawQuery(
             "SELECT id, source, device_id, watch_index, fingerprint, group_id, merge_kind, " +
-                "filter_reason, user_deleted, raw_path, imported_at FROM dive",
+                "filter_reason, user_deleted, raw_path, imported_at, favorite, gas_o2, gas_he, gas_src FROM dive",
             null
         ).use { c ->
             while (c.moveToNext()) {
@@ -387,11 +468,52 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
                     userDeleted = c.getInt(8) != 0,
                     rawPath = if (c.isNull(9)) null else c.getString(9),
                     importedAt = c.getLong(10),
+                    favorite = c.getInt(11) != 0,
+                    gasO2 = if (c.isNull(12)) null else c.getDouble(12),
+                    gasHe = if (c.isNull(13)) null else c.getDouble(13),
+                    gasSource = GasSource.of(if (c.isNull(14)) null else c.getString(14)),
                 )
             }
         }
         return out
     }
+
+    /** 已软删除的记录 id（回收站）。 */
+    fun deletedIds(): Set<String> {
+        val out = HashSet<String>()
+        readableDatabase.rawQuery("SELECT id FROM dive WHERE user_deleted = 1", null).use { c ->
+            while (c.moveToNext()) out.add(c.getString(0))
+        }
+        return out
+    }
+
+    fun favoriteIds(): Set<String> {
+        val out = HashSet<String>()
+        readableDatabase.rawQuery("SELECT id FROM dive WHERE favorite = 1", null).use { c ->
+            while (c.moveToNext()) out.add(c.getString(0))
+        }
+        return out
+    }
+
+    /** 覆盖前要保留的用户标记。 */
+    private fun oldMarkers(db: SQLiteDatabase, id: String): DiveMeta? =
+        db.rawQuery(
+            "SELECT favorite, gas_o2, gas_he, gas_src, user_deleted, group_id, merge_kind FROM dive WHERE id = ?",
+            arrayOf(id)
+        ).use { c ->
+            if (!c.moveToFirst()) return null
+            DiveMeta(
+                id = id,
+                source = DiveSource.BUILTIN,
+                favorite = c.getInt(0) != 0,
+                gasO2 = if (c.isNull(1)) null else c.getDouble(1),
+                gasHe = if (c.isNull(2)) null else c.getDouble(2),
+                gasSource = GasSource.of(if (c.isNull(3)) null else c.getString(3)),
+                userDeleted = c.getInt(4) != 0,
+                groupId = if (c.isNull(5)) null else c.getString(5),
+                mergeKind = MergeKind.of(if (c.isNull(6)) null else c.getString(6)),
+            )
+        }
 
     fun maxDiveNo(): Int =
         readableDatabase.rawQuery("SELECT MAX(dive_no) FROM dive", null).use { c ->
@@ -552,9 +674,12 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
     private fun bindNullableInt(st: android.database.sqlite.SQLiteStatement, i: Int, v: Int?) =
         if (v == null) st.bindNull(i) else st.bindLong(i, v.toLong())
 
+    private fun bindNullableDouble(st: android.database.sqlite.SQLiteStatement, i: Int, v: Double?) =
+        if (v == null) st.bindNull(i) else st.bindDouble(i, v)
+
     companion object {
         const val DB_NAME = "divelog.db"
-        const val DB_VERSION = 1
+        const val DB_VERSION = 2
     }
 }
 
