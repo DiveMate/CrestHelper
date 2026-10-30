@@ -1,7 +1,10 @@
 * text=auto
 
-# 脚本统一 LF（Git Bash / Linux CI 直接可跑）
+# 脚本统一 LF（Git Bash / Linux CI 直接可跑）；gradlew 不带扩展名，要单独写，
+# 否则 Windows 检出成 CRLF 后 Linux/macOS 上会报 "bad interpreter: /bin/sh^M"
 *.sh            text eol=lf
+gradlew         text eol=lf
+gradlew.bat     text eol=crlf
 *.py            text eol=lf
 *.kt            text eol=lf
 *.kts           text eol=lf
