@@ -1,7 +1,19 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+}
+
+// ---- 发布签名 ---------------------------------------------------------------
+// android/keystore.properties（gitignore）里放 storeFile / storePassword /
+// keyAlias / keyPassword。文件不存在时（比如别人 clone 下来只跑 debug）就退化成
+// 不签名的 release——assembleRelease 仍能出包，只是不能直接装。
+// 之所以不硬编码：签名材料一旦进仓库，等于把应用的所有权送人。
+val keystorePropsFile = rootProject.file("keystore.properties")
+val keystoreProps = Properties().apply {
+    if (keystorePropsFile.exists()) keystorePropsFile.inputStream().use { load(it) }
 }
 
 android {
@@ -27,9 +39,22 @@ android {
         }
     }
 
+    signingConfigs {
+        if (keystoreProps.getProperty("storeFile") != null) {
+            create("release") {
+                storeFile = rootProject.file(keystoreProps.getProperty("storeFile"))
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            // 没有 keystore.properties 时保持不签名（assembleRelease 仍能出包）
+            signingConfig = signingConfigs.findByName("release")
         }
         debug {
             // 便于观察日志

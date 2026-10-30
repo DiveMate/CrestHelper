@@ -29,6 +29,10 @@ web/app.json
 *.p12
 *.pem
 *.pfx
+android/keystore.properties
+
+# ---- 发布产物（APK 走 GitHub Release，不进仓库历史）----
+dist/
 
 # ---- Python ----
 __pycache__/
