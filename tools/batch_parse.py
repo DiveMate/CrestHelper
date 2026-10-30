@@ -27,12 +27,27 @@ import sys
 from collections import Counter
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(HERE)
 EXE = os.path.abspath(os.path.join(HERE, "..", "build", "parse_cr4.exe"))
 DEFAULT_RAW = os.path.abspath(os.path.join(HERE, "..", "raw"))
 DEFAULT_OUT = os.path.abspath(os.path.join(HERE, "..", "data"))
 
 RE_FILE = re.compile(r"^=== (.+?) \((\d+) 字节\) ===$")
 RE_NUM = re.compile(r"dive[_-]?(\d+)", re.I)
+
+
+def rel_path(p):
+    """入库用的路径：相对仓库根，且统一成正斜杠。
+
+    绝对路径会把本机用户名和目录结构写进 CSV，上库即泄露，且换机器无意义。
+    """
+    try:
+        rel = os.path.relpath(p, ROOT)
+    except ValueError:
+        rel = os.path.join("raw", os.path.basename(p))
+    if rel.startswith(".."):
+        rel = os.path.join("raw", os.path.basename(p))
+    return rel.replace("\\", "/")
 
 
 def find_bins(raw):
@@ -69,7 +84,7 @@ def parse_output(text, want_samples=True):
             path = m.group(1)
             nm = RE_NUM.search(os.path.basename(path))
             cur = {"file": os.path.basename(path),
-                   "path": path,
+                   "path": rel_path(path),
                    "dive_no": int(nm.group(1)) if nm else "",
                    "bytes": int(m.group(2)),
                    "datetime": "", "divetime_s": "", "maxdepth_m": "",

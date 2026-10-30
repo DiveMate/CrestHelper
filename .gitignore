@@ -15,6 +15,20 @@ build/*.exe
 *.o
 *.so
 *.a
+*.dll
+*.dylib
+
+# ---- 生成产物（可由 tools/analyze.py 重新生成）----
+# web/app-data.js 是页面直接引用的那份，必须留在仓库里；
+# web/app.json 只是同一份数据的中间产物，别把 1.6 MB 的重复内容推上去。
+web/app.json
+
+# ---- 签名材料：绝不入库 ----
+*.keystore
+*.jks
+*.p12
+*.pem
+*.pfx
 
 # ---- Python ----
 __pycache__/

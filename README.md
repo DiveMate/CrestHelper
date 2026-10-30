@@ -19,36 +19,43 @@
 | 模块 | 状态 | 说明 |
 |---|---|---|
 | 数据解析 | ✅ | libdivecomputer 的 `deepsix_excursion` 解析器经 NDK 编译，JNI 输出 JSON |
-| 日志列表 | ✅ | 年/月筛选、收藏筛选、顶栏联动统计、多选合并、**长按→收藏/删除**；只吃摘要，剖面后台分块载入 |
-| 单次详情 | ✅ | 剖面 + 温度曲线、最大/平均深度、温度极值、**最大安全深度**与 **NDL** 实时曲线、气体标注 |
-| 设置 | ✅ | 合并阈值、垃圾阈值、**GF 两个值直配**、默认气体、同步默认模式、数据完整性台账 |
-| 分析 | ✅ | ZHL-16C + GF 减压内核，GF99 风险曲线，多套 GF 对拍 |
+| 日志列表 | ✅ | 年/月筛选、收藏筛选、顶栏联动统计、多选合并与**批量删除**（作用域=当前筛选结果）、长按快捷操作；只吃摘要，剖面后台分块载入 |
+| 回收站 | ✅ | 删除只打 `user_deleted` 标记，原始记录与采样点都还在；可单条/多选/全部恢复，**不提供彻底删除** |
+| 单次详情 | ✅ | 剖面 + 温度曲线、最大/平均深度、温度极值、**最大安全深度**与 **NDL** 实时曲线、气体标注、GF 就地调 |
+| 设置 | ✅ | 合并阈值、垃圾阈值、**GF 两个值直配**（默认 30/85）、默认气体、同步默认模式、回收站入口、数据完整性台账 |
+| 分析 | 🚧 | ZHL-16C + GF 减压内核与 GF99 曲线已就绪，但页面要等整条剖面到齐才算，先不挂导航 |
 | 统计 | ✅ | 年度/月度潜次、深度与时长直方图、水面间隔分布 |
 | 文件导入 | ✅ | SAF 多选 `.bin`，指纹去重，落库后与内置数据合并展示 |
 | 手表同步 | ✅ | 增量按「手表最新编号 − 本地最大编号」对差，锚点指纹校验，异常自动降级全量 |
+| 后台同步 | ✅ | 同步跑在进程级引擎 + 前台服务里，退出页面/切 App/锁屏都不中断，通知栏看进度 |
 | 手表设置 | ✅ | 时间校准三步下发（写日期/时间/落盘，逐字节回读校验）；其余项按能力矩阵标注「固件未开放」 |
 | 元数据 | ✅ | 原始记录全量留档，合并/过滤/删除/收藏/气体都以**标记位**落库，不物理删除 |
 | 配对 | ✅ | 手表地址持久化，下次直连不用重扫；配对成功后弹「增量 / 全量 / 稍后」 |
 
 > 「✅」表示代码与单测齐备；手表同步的 BLE 传输层按实测 GATT 参数实现，
-> 但本轮没有手表可连，**真机回归待首次连表**（见 docs/05 §6）。
+> 但尚未在有表在场时跑完整回归（见 docs/05 §6）。
 
 ## 目录
 
 ```
 dive/
 ├── android/                  Android App（Kotlin + Compose + NDK）
-│   ├── app/src/main/java/com/divelog/app/    UI 与业务
+│   ├── app/src/main/java/com/divelog/app/    UI 与业务（data/ 为 SQLite 层，sync/ 为 BLE 同步）
 │   ├── app/src/main/cpp/                     libdc JNI 桥 + CMake
+│   ├── app/src/main/res/                     图标（mipmap-*）与主题
 │   ├── app/src/test/                         L1 JVM 单测
 │   ├── app/src/androidTest/                  L3 真机仪器测试
 │   └── at.sh                                 一条命令跑完三层测试
 ├── data/                     内置真实数据集（dives.csv / samples.csv）
-├── raw/                      292 个原始 .bin（重新解析的唯一来源）
-├── tools/                    桌面端脚本（探测、下载、批量解析、算法对拍）
+├── raw/                      294 个原始 .bin（重新解析的唯一来源）
+├── tools/                    桌面端脚本（探测、批量解析、算法对拍、图标生成）
+│   ├── make_icons.py         由一张方图生成各密度圆角/圆形/自适应图标
+│   └── wheels/               离线安装 BLE 依赖用的 wheel
 ├── web/                      手机尺寸 UI 原型（先定 UI 再平移安卓）
-├── build/                    免 autotools 的独立解析器
-└── docs/                     调研 / 架构 / 算法 / 工作总结 / 测试指南
+│   └── app-data.js           原型数据（app.json 是同一份数据的中间产物，不入库）
+├── build/                    免 autotools 的独立解析器（parse_cr4.c + build.sh）
+├── third_party/              libdivecomputer（git submodule，pin 9e6c3c8）
+└── docs/                     调研 / 架构 / 算法 / 工作总结 / 同步设计 / 测试指南
 ```
 
 ## 构建
@@ -56,13 +63,17 @@ dive/
 环境：JDK 17、Android SDK（platform 35）、NDK 27.0.12077973、CMake 3.22.1。
 
 ```bash
-# 1) 取第三方解析器（也可用工作区同级已有的 libdivecomputer/）
+# 1) 取第三方解析器
 git submodule update --init --recursive
 
 # 2) 构建
 cd android
-./gradlew :app:assembleDebug
+./gradlew :app:assembleDebug        # 或 bash at.sh build（含 16 KB 页对齐校验）
 ```
+
+`at.sh` 不再硬编码本机路径：JDK 依次找 `$JDK17_HOME` → `$JAVA_HOME` → 常见安装位置，
+SDK 找 `$ANDROID_HOME` → `$ANDROID_SDK_ROOT` → 常见安装位置，Gradle 优先 `./gradlew`。
+都能用环境变量覆盖，换机器通常不用改脚本。
 
 `libdivecomputer` 的定位优先级：`-DLDC_ROOT=` → `third_party/libdivecomputer`（submodule）
 → 工作区同级 `../libdivecomputer`。所以本地已有 clone 时不必再拉 submodule。

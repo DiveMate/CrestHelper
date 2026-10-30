@@ -8,8 +8,18 @@
 set -e
 cd "$(dirname "$0")"
 
-LDC=${LDC:-/c/Users/GX/WorkBuddy/code/libdivecomputer}
-CC=${CC:-/d/envs/MinGW/bin/gcc.exe}
+# libdivecomputer 是仓库根的 submodule；也允许用 LDC=... 覆盖成别处的 checkout
+LDC=${LDC:-$(cd .. && pwd)/third_party/libdivecomputer}
+if [ ! -d "$LDC/src" ]; then
+  echo "找不到 libdivecomputer 源码: $LDC" >&2
+  echo "如果是新 clone：git submodule update --init --recursive" >&2
+  exit 1
+fi
+
+# MinGW gcc：优先 $CC，其次本机装过的位置，最后 PATH 里的 gcc
+if [ -z "${CC:-}" ]; then
+  if [ -x /d/envs/MinGW/bin/gcc.exe ]; then CC=/d/envs/MinGW/bin/gcc.exe; else CC=gcc; fi
+fi
 CFLAGS="-std=gnu99 -O1 -DHAVE_CONFIG_H -I. -I$LDC/include -I$LDC/src"
 
 # 手写一个空 config.h：所有 HAVE_* 都是可选的，缺省即关闭全部外部后端。

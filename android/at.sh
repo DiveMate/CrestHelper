@@ -25,34 +25,75 @@ bad()  { printf "%s[FAIL]%s %s\n" "$RED" "$RST" "$*"; }
 warn() { printf "%s[WARN]%s %s\n" "$YEL" "$RST" "$*"; }
 
 # --- JDK 17 强制就位 -------------------------------------------------------
-# AGP 8.x 必须 JDK 17。若系统 JAVA_HOME 指向别的版本（如 Java 11），必须覆盖，
-# 否则报 "Android Gradle plugin requires Java 17 to run"。
-JDK17_HOME="$JAVA_HOME"
-if [ ! -f "$JDK17_HOME/bin/java.exe" ]; then
-    bad "找不到 JDK 17: $JDK17_HOME"
-    bad "请修改本脚本里的 JDK17_HOME 指向你的 JDK17 目录"
+# --- 路径探测：这些都能被环境变量覆盖，换台机器 clone 下来通常不用改脚本 -----
+PROJ="$(cd "$(dirname "$0")" && pwd)"
+
+# JDK 17（AGP 8.x 强制要求）。依次尝试：$JDK17_HOME → $JAVA_HOME → 常见安装位置。
+# 只认版本号里带 "17." 的，否则 JAVA_HOME 指向 11/21 时会以另一种方式报错。
+pick_java17() {
+    for c in "${JDK17_HOME:-}" "${JAVA_HOME:-}" \
+             "/d/code/jdk17/jdk-17.0.20.1+1" \
+             /c/Program\ Files/Java/jdk-17* \
+             "$HOME"/.jdks/*17* \
+             /usr/lib/jvm/*17* \
+             /opt/java/openjdk; do
+        [ -n "$c" ] || continue
+        { [ -x "$c/bin/java" ] || [ -f "$c/bin/java.exe" ]; } || continue
+        case "$("$c/bin/java" -version 2>&1 | head -1)" in
+            *'"17.'*) printf '%s' "$c"; return 0 ;;
+        esac
+    done
+    return 1
+}
+if ! JAVA_HOME_CANDIDATE="$(pick_java17)"; then
+    bad "找不到 JDK 17。请安装 JDK 17，或用 JDK17_HOME=/path/to/jdk17 指定"
     exit 3
 fi
-export JAVA_HOME="$JDK17_HOME"
+export JAVA_HOME="$JAVA_HOME_CANDIDATE"
 
-export ANDROID_HOME="${ANDROID_HOME:-$ANDROID_HOME}"
-# 关键：Git Bash 不认 Windows 风格的冒号分隔 PATH（ADK 是 Windows 程序，
-# 用 D:/... 会被当成单个非法目录名）。adb.exe 是 Windows 程序，用 MSYS 斜杠路径才能跑。
-ADB_BIN="/d/code/android-sdk/platform-tools"
-[ -d "$ADB_BIN" ] || ADB_BIN="$(cygpath -m "$ANDROID_HOME/platform-tools" 2>/dev/null | sed 's|^\([A-Za-z]\):|/\L\1|')"
+# Android SDK：$ANDROID_HOME → $ANDROID_SDK_ROOT → 常见安装位置
+for c in "${ANDROID_HOME:-}" "${ANDROID_SDK_ROOT:-}" \
+         /d/code/android-sdk "$HOME/Android/Sdk" "${LOCALAPPDATA:-}/Android/Sdk"; do
+    [ -n "$c" ] || continue
+    if [ -d "$c/platform-tools" ]; then
+        # Git Bash 不认 Windows 的 D:\... 写法，统一转成 /d/... 的 MSYS 路径
+        ANDROID_HOME="$(cygpath -u "$c" 2>/dev/null || printf '%s' "$c")"
+        break
+    fi
+done
+if [ -z "${ANDROID_HOME:-}" ] || [ ! -d "$ANDROID_HOME/platform-tools" ]; then
+    bad "找不到 Android SDK（platform-tools）。请设置 ANDROID_HOME"
+    exit 3
+fi
+export ANDROID_HOME
+export ANDROID_SDK_ROOT="$ANDROID_HOME"
+ADB_BIN="$ANDROID_HOME/platform-tools"
 export PATH="$JAVA_HOME/bin:$ADB_BIN:$PATH"
 ADB="$ADB_BIN/adb"
 if [ ! -x "$ADB" ]; then
     bad "找不到 adb：$ADB"
-    bad "请确认 Android SDK 已安装（platform-tools），或修改本脚本里的 ADB_BIN"
     exit 3
 fi
 
-PROJ="/c/Users/GX/WorkBuddy/code/dive/android"
-GRADLE="/d/code/tools/gradle-8.7/bin/gradle"
+# Gradle：优先项目 wrapper，其次 $GRADLE，最后 PATH 里的 gradle
+if [ -x "$PROJ/gradlew" ]; then
+    GRADLE="$PROJ/gradlew"
+elif [ -n "${GRADLE:-}" ] && [ -x "${GRADLE}" ]; then
+    :
+elif [ -x /d/code/tools/gradle-8.7/bin/gradle ]; then
+    GRADLE=/d/code/tools/gradle-8.7/bin/gradle
+else
+    GRADLE="$(command -v gradle || true)"
+fi
+if [ -z "${GRADLE:-}" ] || ! command -v "$GRADLE" >/dev/null 2>&1; then
+    bad "找不到 gradle。请设置 GRADLE=/path/to/gradle 或加进 PATH"
+    exit 3
+fi
+
 PKG="com.divelog.app"
 REPORT="$PROJ/app/build/reports/tests"
-LOGDIR="/d/code/_at_logs"
+# 日志放临时目录：换机器一定有，也不会污染仓库
+LOGDIR="${LOGDIR:-${TMPDIR:-/tmp}/dive-at-logs}"
 mkdir -p "$LOGDIR"
 cd "$PROJ" || exit 1
 
