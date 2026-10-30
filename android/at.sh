@@ -32,7 +32,7 @@ PROJ="$(cd "$(dirname "$0")" && pwd)"
 # 只认版本号里带 "17." 的，否则 JAVA_HOME 指向 11/21 时会以另一种方式报错。
 pick_java17() {
     for c in "${JDK17_HOME:-}" "${JAVA_HOME:-}" \
-             "/d/code/jdk17/jdk-17.0.20.1+1" \
+             /d/code/jdk17/* \
              /c/Program\ Files/Java/jdk-17* \
              "$HOME"/.jdks/*17* \
              /usr/lib/jvm/*17* \
@@ -75,13 +75,14 @@ if [ ! -x "$ADB" ]; then
     exit 3
 fi
 
-# Gradle：优先项目 wrapper，其次 $GRADLE，最后 PATH 里的 gradle
-if [ -x "$PROJ/gradlew" ]; then
-    GRADLE="$PROJ/gradlew"
-elif [ -n "${GRADLE:-}" ] && [ -x "${GRADLE}" ]; then
-    :
-elif [ -x /d/code/tools/gradle-8.7/bin/gradle ]; then
-    GRADLE=/d/code/tools/gradle-8.7/bin/gradle
+# Gradle：$GRADLE 显式指定 > 本机已有安装（不触发下载）> 项目 wrapper > PATH
+if [ -n "${GRADLE:-}" ] && [ -x "${GRADLE}" ]; then
+    :                                       # 用户显式指定，优先
+elif GRADLE="$(ls -d /d/code/tools/gradle-*/bin/gradle 2>/dev/null | sort -V | tail -1)" \
+     && [ -n "$GRADLE" ]; then
+    :                                       # 本机常见装法，直接用，省一次发行包下载
+elif [ -x "$PROJ/gradlew" ]; then
+    GRADLE="$PROJ/gradlew"                  # 仓库自带 wrapper（首次会下载发行包）
 else
     GRADLE="$(command -v gradle || true)"
 fi
