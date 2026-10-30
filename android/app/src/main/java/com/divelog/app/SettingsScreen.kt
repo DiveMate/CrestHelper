@@ -15,6 +15,7 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -60,7 +61,8 @@ fun SettingsScreen(
     onForgetPaired: () -> Unit,
     deletedCount: Int,
     onOpenCleanup: () -> Unit,
-    onRestoreAll: () -> Unit,
+    /** 打开回收站（所有被软删的记录都在里面，用户自己找）。 */
+    onOpenRecycle: () -> Unit,
 ) {
     LazyColumn(
         contentPadding = androidx.compose.foundation.layout.PaddingValues(12.dp),
@@ -137,18 +139,18 @@ fun SettingsScreen(
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = onOpenCleanup) { Text("预览并清理…") }
-                    if (deletedCount > 0) {
-                        TextButton(onClick = onRestoreAll) { Text("恢复已删除的 $deletedCount 条") }
-                    }
-                }
+                TextButton(onClick = onOpenCleanup) { Text("预览并清理…") }
             }
         }
 
         // ------------------------------------------------------------ 减压算法
         item {
-            SettingCard("减压算法", "ZHL-16C + 梯度余量，两个 GF 值直接配，不用再从档位里挑") {
+            SettingCard(
+                "减压算法",
+                "ZHL-16C + 梯度余量，默认 " +
+                    "${DecoSettings.fmt(DecoSettings.DEFAULT.gfLow)}/" +
+                    "${DecoSettings.fmt(DecoSettings.DEFAULT.gfHigh)}；要别的值直接填数字",
+            ) {
                 var lowText by remember(deco.gfLow) { mutableStateOf(DecoSettings.fmt(deco.gfLow)) }
                 var highText by remember(deco.gfHigh) { mutableStateOf(DecoSettings.fmt(deco.gfHigh)) }
                 val low = lowText.toDoubleOrNull()
@@ -189,18 +191,17 @@ fun SettingsScreen(
                         },
                     )
                 }
-                Text(
-                    if (ok) "当前 ${deco.algorithm().name} · ${deco.describe()}"
-                    else "GF 必须在 10~100 之间，且 Low ≤ High",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = if (ok) MaterialTheme.colorScheme.onSurfaceVariant
-                    else MaterialTheme.colorScheme.error,
-                )
-                Text(
-                    "参考：50/70 休闲常用、30/85 技术潜水、100/100 等于不加余量（最激进）。",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        if (ok) "${deco.algorithm().name} · ${deco.describe()}"
+                        else "GF 必须在 10~100 之间，且 Low ≤ High",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (ok) MaterialTheme.colorScheme.onSurfaceVariant
+                        else MaterialTheme.colorScheme.error,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = { onDeco(DecoSettings.DEFAULT) }) { Text("恢复默认") }
+                }
             }
         }
 
@@ -264,7 +265,7 @@ fun SettingsScreen(
 
         // ------------------------------------------------------------ 同步
         item {
-            SettingCard("手表同步", "默认用哪种模式；配对手表后在设备页可以改单次选择") {
+            SettingCard("手表同步", "默认用哪种模式；同步页里也能就地改（同一份值）") {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     SyncModeChip("自动", SyncMode.AUTO, syncMode, onSyncMode)
                     SyncModeChip("增量", SyncMode.INCREMENTAL, syncMode, onSyncMode)
@@ -311,11 +312,31 @@ fun SettingsScreen(
                 KvLine("已收藏", "${data.favoriteCount} 条")
                 KvLine("采样点", "${data.totalSamples} 个")
                 Text(
-                    "恢复入口：清理页的「全部恢复」，或详情页单条恢复；" +
+                    "删掉的都在「回收站」里，恢复只是清标记，不重新解析；" +
                         "只有设备页的「清空导入的数据」会真正删库，那里有二次确认。",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
+            }
+        }
+
+        // ------------------------------------------------------------ 回收站
+        // 删除是静默的（不弹"已删除/撤销"），所以入口必须显眼且**永远在**——
+        // 不按有没有内容来隐藏，否则删完再想找回就找不到入口了。
+        item {
+            SettingCard(
+                "回收站",
+                "删掉的记录不会真的消失，都在这里；恢复只是把标记清掉",
+            ) {
+                Text(
+                    if (deletedCount > 0) "里面有 $deletedCount 条等你处理" else "现在是空的",
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.SemiBold,
+                )
+                OutlinedButton(
+                    onClick = onOpenRecycle,
+                    modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                ) { Text(if (deletedCount > 0) "打开回收站（$deletedCount）" else "打开回收站") }
             }
         }
 

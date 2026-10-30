@@ -115,10 +115,13 @@ data class GasSettings(
  *
  * 档位是把连续的 GF 参数离散化，实际用起来总有一个"差一点"的尴尬：
  * 想按 GF 55/75 潜水就只能选 50/70 或 80/80。这里改成自由输入 + 合法性校验。
+ *
+ * 默认 30/85：深处留大余量、浅处放宽，技术潜水里最常见的一组；
+ * 比 50/70 保守，宁可多算一点减压也不低估。
  */
 data class DecoSettings(
-    val gfLow: Double = 50.0,
-    val gfHigh: Double = 70.0,
+    val gfLow: Double = 30.0,
+    val gfHigh: Double = 85.0,
 ) {
     fun algorithm(): Deco.Algorithm =
         Deco.algorithmFor(gfLow / 100.0, gfHigh / 100.0).copy(desc = describe())
@@ -135,6 +138,9 @@ data class DecoSettings(
     companion object {
         const val MIN = 10.0
         const val MAX = 100.0
+
+        /** 出厂参数（30/85）。详情页拿它判断「现在是不是默认值」。 */
+        val DEFAULT = DecoSettings()
 
         /** GF 合法：都在 10~100，且 low ≤ high（否则 M 值线插值会反向）。 */
         fun valid(low: Double, high: Double): Boolean =
@@ -432,11 +438,11 @@ class DivePrefs(ctx: Context) {
 
     val settings: DiveSettings get() = DiveSettings(autoMerge, siThresholdS)
 
-    /** 减压算法：GF 两个值直接可配。 */
+    /** 减压算法：GF 两个值直接可配。默认 30/85（跟 [DecoSettings] 的默认值保持一致）。 */
     var decoSettings: DecoSettings
         get() = DecoSettings(
-            sp.getFloat(KEY_GF_LOW, 50f).toDouble(),
-            sp.getFloat(KEY_GF_HIGH, 70f).toDouble(),
+            sp.getFloat(KEY_GF_LOW, 30f).toDouble(),
+            sp.getFloat(KEY_GF_HIGH, 85f).toDouble(),
         )
         set(v) = sp.edit()
             .putFloat(KEY_GF_LOW, v.gfLow.toFloat())

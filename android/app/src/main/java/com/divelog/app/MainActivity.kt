@@ -16,7 +16,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Build
 import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.CircularProgressIndicator
@@ -28,10 +27,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -50,7 +47,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.divelog.app.sync.SyncMode
-import com.divelog.app.sync.WatchSession
+import com.divelog.app.sync.WatchHub
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -80,9 +77,15 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+/**
+ * 底部导航。
+ *
+ * 「分析」暂时不上了（[AnalysisScreen] 代码留着，等确定要什么之后再说）：
+ * 它需要等整条剖面到齐才能算，几千条记录时会长时间显示"0 减压"这种假结论，
+ * 与其给个半成品，不如先藏起来。统计页已经覆盖"看总量"的需求。
+ */
 private val TABS = listOf(
     "日志" to Icons.Default.Home,
-    "分析" to Icons.Default.Search,
     "统计" to Icons.Default.Star,
     "设备" to Icons.Default.Settings,
     "设置" to Icons.Default.Build,
@@ -94,8 +97,9 @@ fun DiveApp() {
     val ctx = LocalContext.current
     val prefs = remember { DivePrefs(ctx) }
     val repo = remember { DiveRepository(ctx) }
-    // BLE 连接要跨页保持（切 tab 不应该断线），所以会话放在这里而不是设备页内部
-    val watchSession = remember { WatchSession() }
+    // BLE 连接与同步都挂在进程级单例上：切 tab 不断线，退出同步页/锁屏也不中断下载
+    val watchSession = WatchHub.session
+    val syncState by WatchHub.engine.state.collectAsState()
     val scope = rememberCoroutineScope()
     val snackbarHost = remember { SnackbarHostState() }
 
@@ -113,6 +117,8 @@ fun DiveApp() {
     var manualGroups by remember { mutableStateOf<List<List<String>>>(emptyList()) }
 
     var openId by remember { mutableStateOf<String?>(null) }
+    var showSync by remember { mutableStateOf(false) }
+    var showRecycle by remember { mutableStateOf(false) }
     var showCleanup by remember { mutableStateOf(false) }
     var importing by remember { mutableStateOf(false) }
     var importedCount by remember { mutableIntStateOf(0) }
@@ -132,6 +138,26 @@ fun DiveApp() {
 
     LaunchedEffect(Unit) {
         runCatching { reload() }.onFailure { error = it.message ?: it.toString() }
+    }
+
+    /**
+     * 同步在进程级引擎里跑，界面只监听"完成信号"。
+     *
+     * 这样即使同步进行到一半退出了同步页、锁屏、甚至 Activity 重建，
+     * 完成之后数据照样会自动刷新一遍，不用用户回来手动下拉。
+     */
+    var seenSyncTick by remember { mutableIntStateOf(0) }
+    LaunchedEffect(syncState.finishedTick) {
+        if (syncState.finishedTick == seenSyncTick) return@LaunchedEffect
+        seenSyncTick = syncState.finishedTick
+        runCatching { reload() }
+        val r = syncState.result
+        val msg = when {
+            syncState.error != null -> "同步未完成：${syncState.error}"
+            r != null -> "同步完成：新增 ${r.added} · 更新 ${r.updated} · 跳过 ${r.skipped}"
+            else -> "同步结束"
+        }
+        snackbarHost.showSnackbar(msg)
     }
 
     // 导入 .bin：读字节 -> 解析 -> 落盘 -> 重载数据集（与蓝牙下载共用一条路径）
@@ -235,7 +261,7 @@ fun DiveApp() {
         }
     }
 
-    /** 软删除：只写 user_deleted，原始记录与原始字节都还在。 */
+    /** 软删除：只写 user_deleted。删完不弹提示，要找回就去回收站。 */
     fun deleteEntries(targets: List<DiveEntry>) {
         if (targets.isEmpty()) return
         val files = targets.flatMap { e -> e.records.map { it.file } }.toSet()
@@ -243,15 +269,6 @@ fun DiveApp() {
         scope.launch {
             repo.markDeleted(files, true)
             reload()
-            val res = snackbarHost.showSnackbar(
-                "已删除 ${targets.size} 组（数据仍在库里，可恢复）",
-                actionLabel = "撤销",
-                duration = SnackbarDuration.Long,
-            )
-            if (res == SnackbarResult.ActionPerformed) {
-                repo.markDeleted(files, false)
-                reload()
-            }
         }
     }
 
@@ -279,6 +296,54 @@ fun DiveApp() {
             onUnmerge = { unmerge(openEntry) },
             samples = sampleState.map,
             loading = sampleState.loading,
+        )
+        return
+    }
+
+    // 同步页同样独占屏幕（从设备页点进来），返回键回设备页
+    val dsForSync = data
+    if (showSync && dsForSync != null) {
+        BackHandler(enabled = true) { showSync = false }
+        SyncScreen(
+            data = dsForSync,
+            repo = repo,
+            session = watchSession,
+            syncMode = syncMode,
+            onSyncMode = { mode ->
+                syncMode = mode
+                prefs.syncMode = mode
+            },
+            pairedAddress = pairedAddress,
+            pairedName = pairedName,
+            onPaired = { addr, name ->
+                pairedAddress = addr
+                pairedName = name
+                prefs.pairedAddress = addr
+                prefs.pairedName = name
+            },
+            onForgetPaired = {
+                prefs.forgetPaired()
+                pairedAddress = null
+                pairedName = null
+            },
+            onBack = { showSync = false },
+        )
+        return
+    }
+
+    // 回收站：所有被软删的原始记录，恢复只是清标记
+    if (showRecycle) {
+        BackHandler(enabled = true) { showRecycle = false }
+        RecycleBinScreen(
+            dives = data?.dives ?: emptyList(),
+            meta = data?.meta ?: emptyMap(),
+            onRestore = { ids ->
+                scope.launch {
+                    repo.markDeleted(ids, false)
+                    reload()
+                }
+            },
+            onBack = { showRecycle = false },
         )
         return
     }
@@ -343,26 +408,15 @@ fun DiveApp() {
                         onMergeSelected = { mergeSelected(it) },
                         onToggleFavorite = { toggleFavorite(it) },
                         onDelete = { deleteEntries(listOf(it)) },
+                        onDeleteSelected = { deleteEntries(it) },
                         profileProgress = sampleState.progress.takeIf { sampleState.loading },
                         profileLoaded = sampleState.loadedDives,
                         profileTotal = sampleState.totalDives,
                     )
 
-                    tab == 1 -> AnalysisScreen(
-                        data = ds,
-                        settings = settings,
-                        excluded = deleted,
-                        samples = sampleState.map,
-                        samplesLoading = sampleState.loading,
-                        samplesProgress = sampleState.progress,
-                        onOpen = { dive ->
-                            openId = entries.firstOrNull { e -> e.records.any { it.file == dive.file } }?.id
-                        },
-                    )
+                    tab == 1 -> StatsScreen(entries)
 
-                    tab == 2 -> StatsScreen(entries)
-
-                    tab == 3 -> DeviceScreen(
+                    tab == 2 -> DeviceScreen(
                         data = ds,
                         entries = entries,
                         deletedCount = deleted.size,
@@ -373,12 +427,7 @@ fun DiveApp() {
                         defaultSyncMode = syncMode,
                         pairedAddress = pairedAddress,
                         pairedName = pairedName,
-                        onPaired = { addr, name ->
-                            pairedAddress = addr
-                            pairedName = name
-                            prefs.pairedAddress = addr
-                            prefs.pairedName = name
-                        },
+                        onOpenSync = { showSync = true },
                         onImport = { importLauncher.launch(arrayOf("*/*")) },
                         onClearImported = {
                             scope.launch {
@@ -387,7 +436,6 @@ fun DiveApp() {
                                 snackbarHost.showSnackbar("已清空导入的日志")
                             }
                         },
-                        onSyncFinished = { scope.launch { reload() } },
                     )
 
                     else -> SettingsScreen(
@@ -418,13 +466,7 @@ fun DiveApp() {
                         },
                         deletedCount = deleted.size,
                         onOpenCleanup = { showCleanup = true },
-                        onRestoreAll = {
-                            scope.launch {
-                                repo.markDeleted(deleted, false)
-                                reload()
-                                snackbarHost.showSnackbar("已恢复 ${deleted.size} 条记录")
-                            }
-                        },
+                        onOpenRecycle = { showRecycle = true },
                     )
                 }
             }

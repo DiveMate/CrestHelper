@@ -154,6 +154,30 @@ class MarksSurviveSyncTest {
     }
 
     @Test
+    fun `删除后反复同步同一条不会复活，恢复后也不会被重新删掉`() {
+        db.insertAll(listOf(row("w1", watchIndex = 7, fingerprint = "aa01")))
+        db.setUserDeleted(listOf("w1"), true)
+        assertEquals(setOf("w1"), db.deletedIds())
+
+        // 场景：用户删了一条，之后手表又同步了几轮。
+        // 上层对同指纹是直接 SKIPPED，这里假设最坏情况——真的又写了几遍。
+        repeat(3) {
+            db.insertAll(listOf(row("w1", watchIndex = 7, fingerprint = "aa01")))
+            assertTrue("同步必须不能让删掉的记录回到列表", db.metaMap()["w1"]!!.userDeleted)
+        }
+        assertEquals(setOf("w1"), db.deletedIds())
+        assertEquals("反复同步也不能多出记录", 1, db.count())
+
+        // 从回收站恢复
+        db.setUserDeleted(listOf("w1"), false)
+        assertTrue(db.deletedIds().isEmpty())
+
+        // 恢复之后再同步一次，不能被旧标记重新标成已删除
+        db.insertAll(listOf(row("w1", watchIndex = 7, fingerprint = "aa01")))
+        assertFalse("恢复后同步不能又把它删掉", db.metaMap()["w1"]!!.userDeleted)
+    }
+
+    @Test
     fun `回收站按标记列出，恢复后回到正常列表`() {
         db.insertAll(listOf(row("a"), row("b"), row("c")))
         db.setUserDeleted(listOf("a", "b"), true)

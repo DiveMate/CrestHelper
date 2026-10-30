@@ -132,7 +132,17 @@ data class DiveDataSet(
     /** 记录里自带的、可用的气体（v0 格式记录没有，所以通常是空）。 */
     val gasFromRecords: Int get() = meta.values.count { it.gasSource == GasSource.RECORD }
 
-    val totalSamples: Int get() = samples.values.sumOf { it.size }
+    /**
+     * 采样点总数。
+     *
+     * 走 dive 表的 nsamples 摘要列，**不数已载入的剖面** —— 剖面是分块按需载入的，
+     * 数 samples 会得到"现在载入了几条就是几万"，启动瞬间甚至是 0。
+     * 只有旧 CSV 迁移路径（nsamples 没填）才退回数剖面。
+     */
+    val totalSamples: Int get() {
+        val fromColumn = dives.sumOf { it.nsamples }
+        return if (fromColumn > 0) fromColumn else samples.values.sumOf { it.size }
+    }
     val totalSeconds: Long get() = dives.sumOf { it.divetimeS.toLong() }
     val maxDepth: Double get() = dives.maxOfOrNull { it.maxdepthM } ?: 0.0
 }
@@ -632,6 +642,9 @@ class DiveRepository(private val ctx: Context) {
     fun upsertWatch(w: WatchRecord) = db.upsertWatch(w)
 
     fun watch(id: String): WatchRecord? = db.watch(id)
+
+    /** 最近一次同步记录（任意手表），用于设备页入口卡的"上次同步"。 */
+    fun lastSyncAny(): SyncRunRecord? = db.lastSyncAny()
 
     fun logSync(run: SyncRunRecord) = db.logSync(run)
 

@@ -798,11 +798,16 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
     }
 
     fun lastSync(watchId: String): SyncRunRecord? =
-        readableDatabase.rawQuery(
-            "SELECT watch_id, mode, started_at, finished_at, added, updated, skipped, failed, note " +
-                "FROM sync_run WHERE watch_id = ? ORDER BY id DESC LIMIT 1",
-            arrayOf(watchId)
-        ).use { c ->
+        rawSync("SELECT watch_id, mode, started_at, finished_at, added, updated, skipped, failed, note " +
+            "FROM sync_run WHERE watch_id = ? ORDER BY id DESC LIMIT 1", arrayOf(watchId))
+
+    /** 最近一次同步（不区分手表）：设备页那张入口卡要显示"上次同步是什么时候"。 */
+    fun lastSyncAny(): SyncRunRecord? =
+        rawSync("SELECT watch_id, mode, started_at, finished_at, added, updated, skipped, failed, note " +
+            "FROM sync_run ORDER BY id DESC LIMIT 1", emptyArray())
+
+    private fun rawSync(sql: String, args: Array<String>): SyncRunRecord? =
+        readableDatabase.rawQuery(sql, args).use { c ->
             if (!c.moveToFirst()) return null
             SyncRunRecord(
                 watchId = c.getString(0),

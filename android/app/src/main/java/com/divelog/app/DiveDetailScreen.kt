@@ -127,7 +127,9 @@ fun DiveDetailScreen(
                 MetricCard("采样点", "${entry.primary.nsamples}", Modifier.weight(1f))
             }
 
-            // 气体：记录里没写就得靠人标，直接影响 NDL，所以放在最显眼的位置之一
+            // 气体：默认空气，只给一个「标注」入口。
+            // 不写「这条记录没有气体信息」之类的解释 —— CR-4 老格式本来就不带 FO₂，
+            // 每条都提示一遍等于噪音，用户要标的时候自然会点。
             Card(
                 colors = CardDefaults.cardColors(
                     containerColor = if (entry.isNitrox) MaterialTheme.colorScheme.primaryContainer
@@ -140,40 +142,49 @@ fun DiveDetailScreen(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
-                        Text("呼吸气体", style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(
+                            "呼吸气体",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                         Text(
                             entry.gasLabel,
                             style = MaterialTheme.typography.titleSmall,
                             fontWeight = FontWeight.SemiBold,
-                        )
-                        Text(
-                            when {
-                                entry.gasSource == GasSource.USER -> "你手动标的。改回「跟随记录」会让 NDL 按默认气体重算。"
-                                entry.gasSource == GasSource.RECORD -> "从原始记录里解析出来的。"
-                                entry.gasCount > 1 -> "记录里发现 ${entry.gasCount} 种气体，剖面末端的气体切换暂未按段切换计算。"
-                                else -> "这条记录没有气体信息（CR-4 老格式不存 FO2），按全局默认气体算。"
-                            },
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                     TextButton(onClick = { showGas = true }) { Text("标注") }
                 }
             }
 
-            // 减压算法：GF 直接可配，这里就地能改（跟设置页同一份值）
-            Text("减压算法", style = MaterialTheme.typography.titleSmall)
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    algo.name,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.weight(1f),
-                )
-                TextButton(onClick = { showGf = true }) { Text("调整 GF") }
+            // 减压算法：只报当前参数，要别的值就点「修改」自己填。
+            // 原来那排常用档位（50/70、80/80…）已经去掉——它只是快捷方式，
+            // 摆在详情页上反而像"只能在预设里挑"。
+            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "减压算法",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            "ZHL-16C · 参数 ${DecoSettings.fmt(deco.gfLow)}/${DecoSettings.fmt(deco.gfHigh)}",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            if (deco == DecoSettings.DEFAULT) "默认设置" else "已自定义",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    TextButton(onClick = { showGf = true }) { Text("修改") }
+                }
             }
-            Text(algo.desc, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 
             // 减压结论
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -186,7 +197,8 @@ fun DiveDetailScreen(
                 MetricCard("GF99 峰值", "${Fmt.one(analysis.gf99Max)}%", Modifier.weight(1f))
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                MetricCard("最大上升", "${Fmt.one(analysis.ascentMax)} m/min", Modifier.weight(1f))
+                // 单位放进 label：值写成 "11.2 m/min" 会在这张三等分卡片里折行
+                MetricCard("上升速度", "${Fmt.one(analysis.ascentMax)} m/min", Modifier.weight(1f), dense = true)
                 MetricCard("NDL 最低", ndlText(ndlMin), Modifier.weight(1f))
                 MetricCard("NDL 出水", ndlText(ndlEnd), Modifier.weight(1f))
             }
@@ -424,7 +436,9 @@ private fun GfDialog(
                     else MaterialTheme.colorScheme.error,
                 )
                 Text(
-                    "GF 越保守（值越小），NDL 越短、天花板越深。改完所有页面的数值一起变。",
+                    "默认 ${DecoSettings.fmt(DecoSettings.DEFAULT.gfLow)}/" +
+                        "${DecoSettings.fmt(DecoSettings.DEFAULT.gfHigh)}；" +
+                        "GF 越小越保守，NDL 越短、天花板越深。改完所有页面一起变。",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -441,7 +455,7 @@ private fun GfDialog(
         },
         dismissButton = {
             Row {
-                TextButton(onClick = { onChange(DecoSettings(50.0, 70.0)); onDismiss() }) { Text("恢复 50/70") }
+                TextButton(onClick = { onChange(DecoSettings.DEFAULT); onDismiss() }) { Text("恢复默认") }
                 TextButton(onClick = onDismiss) { Text("取消") }
             }
         },
@@ -476,11 +490,22 @@ private fun LegendItem(text: String, color: Color) {
 }
 
 @Composable
-private fun MetricCard(label: String, value: String, modifier: Modifier = Modifier) {
+private fun MetricCard(
+    label: String,
+    value: String,
+    modifier: Modifier = Modifier,
+    /** 带单位的长值（如 "11.2 m/min"）在三分之一宽的卡里会折行，用小一号字。 */
+    dense: Boolean = false,
+) {
     Card(modifier) {
         Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
             Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text(value, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Text(
+                value,
+                style = if (dense) MaterialTheme.typography.titleSmall else MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+            )
         }
     }
 }

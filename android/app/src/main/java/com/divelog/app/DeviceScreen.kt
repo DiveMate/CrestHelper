@@ -2,7 +2,6 @@ package com.divelog.app
 
 import android.Manifest
 import android.bluetooth.BluetoothManager
-import android.bluetooth.le.ScanResult
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -17,6 +16,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
@@ -27,44 +27,35 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import com.divelog.app.sync.Cr4Scanner
+import com.divelog.app.data.SyncRunRecord
 import com.divelog.app.sync.LinkState
-import com.divelog.app.sync.PlanKind
-import com.divelog.app.sync.PlanBundle
 import com.divelog.app.sync.SyncMode
-import com.divelog.app.sync.SyncPlan
-import com.divelog.app.sync.SyncProgress
-import com.divelog.app.sync.SyncResult
-import com.divelog.app.sync.WatchInfo
+import com.divelog.app.sync.WatchHub
 import com.divelog.app.sync.WatchSession
-import com.divelog.app.sync.WatchSetting
-import com.divelog.app.sync.WatchSync
-import com.divelog.app.sync.ClockResult
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * 设备页：运行环境 + 数据概况 + **手表同步/设置** + 文件导入。
+ * 设备页：**运行环境 + 数据概况 + 同步入口 + 文件导入**。
  *
- * 同步的交互刻意做成「先看计划、再点执行」：
- * 用户点连接后先读到设备信息与同步计划（全量还是增量、为什么），
- * 确认无误再真正下载。手表日志少的时候差别不大，几百条时这一步能省下几分钟。
+ * 真正的同步操作搬到了独立的 [SyncScreen]（点「打开同步页」进入）。
+ * 这里只留一张状态卡，让人一眼看到「有没有配对 / 现在连没连 / 上次什么时候同步的」，
+ * 不用再在一堆卡片里往下滚找同步按钮。
  */
 @Composable
 fun DeviceScreen(
@@ -75,18 +66,16 @@ fun DeviceScreen(
     importing: Boolean = false,
     repo: DiveRepository,
     session: WatchSession,
-    /** 设置页里选的默认同步模式。 */
+    /** 设置页里选的默认同步模式，只在入口卡上展示。 */
     defaultSyncMode: SyncMode = SyncMode.AUTO,
     pairedAddress: String? = null,
     pairedName: String? = null,
-    onPaired: (address: String, name: String) -> Unit = { _, _ -> },
+    onOpenSync: () -> Unit = {},
     onImport: () -> Unit = {},
     onClearImported: () -> Unit = {},
-    onSyncFinished: () -> Unit = {},
 ) {
     val ctx = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    val scope = rememberCoroutineScope()
 
     val perms = remember {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -111,8 +100,7 @@ fun DeviceScreen(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { refreshTick++ }
 
-    val btManager = ctx.getSystemService(BluetoothManager::class.java)
-    val adapter = btManager?.adapter
+    val adapter = ctx.getSystemService(BluetoothManager::class.java)?.adapter
     val btEnabled = adapter?.isEnabled == true
     val soLoaded = DiveParser.isAvailable
     val years = remember(entries) {
@@ -120,131 +108,18 @@ fun DeviceScreen(
         if (ys.isEmpty()) "-" else "${ys.min()} ~ ${ys.max()}"
     }
 
-    // ---- 手表同步状态 ----
-    val scanner = remember { Cr4Scanner(ctx) }
+    // 连接状态跨页保持，这里只是读它来显示
     val linkState by session.state.collectAsState()
-    var devices by remember { mutableStateOf<List<ScanResult>>(emptyList()) }
-    var scanning by remember { mutableStateOf(false) }
-    var watchInfo by remember { mutableStateOf<WatchInfo?>(null) }
-    var bundle by remember { mutableStateOf<PlanBundle?>(null) }
-    var syncing by remember { mutableStateOf(false) }
-    var progress by remember { mutableStateOf<SyncProgress?>(null) }
-    var result by remember { mutableStateOf<SyncResult?>(null) }
-    var settings by remember { mutableStateOf<List<WatchSetting>>(emptyList()) }
-    var message by remember { mutableStateOf<String?>(null) }
-    var clockMessage by remember { mutableStateOf<String?>(null) }
-    // 配对成功后弹「要不要现在同步」——不让它默认就跑，几百条表能跑几分钟
-    var showSyncPrompt by remember { mutableStateOf(false) }
+    // 同步跑在进程级引擎里，即使人已经退出同步页，这张卡也照样能看到进度
+    val eng by WatchHub.engine.state.collectAsState()
 
-    fun scan() {
-        if (scanning) return
-        scope.launch {
-            scanning = true
-            message = null
-            runCatching { scanner.scan(8_000) }
-                .onSuccess {
-                    devices = it
-                    message = if (it.isEmpty()) "没扫到手表。确认表已开机、离手机近一点、蓝牙已开。" else null
-                }
-                .onFailure { message = it.message }
-            scanning = false
-        }
-    }
-
-    fun connectAndInspect(device: android.bluetooth.BluetoothDevice) {
-        scope.launch {
-            message = null
-            result = null
-            settings = emptyList()
-            watchInfo = null
-            bundle = null
-            val res = session.connect(ctx, device)
-            val link = res.getOrNull() ?: run {
-                message = res.exceptionOrNull()?.message ?: "连接失败"
-                return@launch
-            }
-            // 配对信息落库（地址用于下次直接连，不用再扫 8 秒）
-            val name = runCatching { device.name }.getOrNull() ?: pairedName ?: "CR-4"
-            onPaired(device.address, name)
-            runCatching {
-                withContext(Dispatchers.IO) {
-                    val sync = WatchSync(link, repo)
-                    val info = sync.info()
-                    val plan = sync.makePlan(defaultSyncMode)
-                    Triple(info, plan, sync.settingsMatrix(info))
-                }
-            }.onSuccess { (info, plan, matrix) ->
-                watchInfo = info
-                bundle = plan
-                settings = matrix
-                showSyncPrompt = true
-            }.onFailure {
-                message = "读取设备信息失败：${it.message ?: it}"
-                // 设备信息读不出来也允许直接同步，避免卡在"不能同步也不能断开"
-                showSyncPrompt = true
-            }
-        }
-    }
-
-    /** 连已配对手表：地址存在 prefs 里，省掉每次扫描。 */
-    fun connectPaired() {
-        val addr = pairedAddress ?: return
-        val dev = runCatching { adapter?.getRemoteDevice(addr) }.getOrNull()
-        if (dev == null) {
-            message = "配对的地址无效（$addr），请重新扫描一次"
-            return
-        }
-        connectAndInspect(dev)
-    }
-
-    fun runSync(mode: SyncMode) {
-        val link = session.link ?: return
-        if (syncing) return
-        showSyncPrompt = false
-        scope.launch {
-            syncing = true
-            progress = null
-            result = null
-            message = null
-            val sync = WatchSync(link, repo)
-            runCatching {
-                val b = withContext(Dispatchers.IO) { sync.makePlan(mode) }
-                bundle = b
-                withContext(Dispatchers.IO) { sync.run(b) { progress = it } }
-            }.onSuccess {
-                result = it
-                onSyncFinished()
-                // 同步后重新读设备信息，刷新「本地进度」
-                runCatching {
-                    withContext(Dispatchers.IO) {
-                        val info = sync.info()
-                        val plan = sync.makePlan(defaultSyncMode)
-                        Triple(info, plan, sync.settingsMatrix(info))
-                    }
-                }.onSuccess { (info, plan, matrix) ->
-                    watchInfo = info
-                    bundle = plan
-                    settings = matrix
-                }
-            }.onFailure {
-                message = "同步失败：${it.message ?: it}"
-            }
-            syncing = false
-            progress = null
-        }
-    }
-
-    fun syncClock() {
-        val link = session.link ?: return
-        scope.launch {
-            clockMessage = null
-            val r = withContext(Dispatchers.IO) { WatchSync(link, repo).setClock() }
-            clockMessage = when (r) {
-                is ClockResult.Ok -> "已下发 ${"%04d-%02d-%02d %02d:%02d:%02d".format(
-                    r.at.year, r.at.monthValue, r.at.dayOfMonth, r.at.hour, r.at.minute, r.at.second,
-                )}"
-                is ClockResult.Failed -> "失败：${r.reason}"
-            }
+    // 上次同步：每次回到本页（或刷新）重读一次
+    var lastRun by remember { mutableStateOf<SyncRunRecord?>(null) }
+    // 清空是真删库，点之前必须再问一次
+    var showClearConfirm by remember { mutableStateOf(false) }
+    androidx.compose.runtime.LaunchedEffect(refreshTick, importedCount) {
+        lastRun = withContext(Dispatchers.IO) {
+            runCatching { repo.lastSyncAny() }.getOrNull()
         }
     }
 
@@ -253,6 +128,65 @@ fun DeviceScreen(
         verticalArrangement = Arrangement.spacedBy(10.dp),
         modifier = Modifier.fillMaxSize(),
     ) {
+        // ---------------------------------------------------------------- 同步入口
+        item {
+            InfoCard("手表同步", "配对、增量/全量、手表设置都在这一页里") {
+                val linked = linkState is LinkState.Ready
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            when (val st = linkState) {
+                                is LinkState.Ready -> "已连接 ${st.name}"
+                                is LinkState.Connecting -> "正在连接…"
+                                is LinkState.Failed -> "上次连接失败"
+                                else -> if (pairedAddress != null) "已配对：${pairedName ?: "CR-4"}" else "还没配对"
+                            },
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        Text(
+                            pairedAddress ?: "扫描一次就能配上，以后直接连",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Text(
+                            lastRun?.let { "上次同步 ${stampOf(it)} · ${runBrief(it)}" } ?: "还没同步过",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Button(onClick = onOpenSync) {
+                        Text(if (eng.running) "看进度" else if (linked || pairedAddress != null) "打开" else "配对手表")
+                    }
+                }
+                if (eng.running) {
+                    LinearProgressIndicator(
+                        progress = { eng.fraction },
+                        modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                    )
+                    Text(
+                        "${eng.line}（后台同步中，可以离开这一页）",
+                        style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(top = 2.dp),
+                    )
+                }
+                HorizontalDivider(Modifier.padding(vertical = 6.dp))
+                Line("默认模式", modeLabel(defaultSyncMode))
+                Line("本地手表记录", "${data.watchCount} 条")
+                if (!permGranted || !btEnabled) {
+                    Text(
+                        when {
+                            !permGranted -> "还没给蓝牙权限，进同步页时会提示申请"
+                            else -> "蓝牙未开启，先在系统设置里打开"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(top = 2.dp),
+                    )
+                }
+            }
+        }
+
         // ---------------------------------------------------------------- 数据
         item {
             InfoCard("数据", "APK 内置的真实设备日志 + 手表同步 + 文件导入") {
@@ -268,184 +202,6 @@ fun DeviceScreen(
             }
         }
 
-        // ---------------------------------------------------------------- 同步
-        item {
-            InfoCard("手表同步", "增量：用手表最新编号与本地最大编号对差；全量：逐条核对指纹") {
-                val st = linkState
-                when (st) {
-                    is LinkState.Ready -> {
-                        Line("连接", st.name)
-                        watchInfo?.let { Line("手表档案", deviceLine(it)) }
-                        HorizontalDivider(Modifier.padding(vertical = 6.dp))
-                        bundle?.let { b -> PlanCard(b.plan) }
-
-                        if (syncing) {
-                            val p = progress
-                            LinearProgressIndicator(
-                                progress = { p?.fraction ?: 0f },
-                                modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
-                            )
-                            Text(
-                                p?.let { "第 ${it.current}/${it.total} 条 · #${it.index} · ${it.stage}" }
-                                    ?: "准备中…",
-                                style = MaterialTheme.typography.labelSmall,
-                                modifier = Modifier.padding(top = 4.dp),
-                            )
-                        } else {
-                            Row(
-                                Modifier.fillMaxWidth().padding(top = 6.dp),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            ) {
-                                Button(
-                                    onClick = { runSync(defaultSyncMode) },
-                                    modifier = Modifier.weight(1f),
-                                ) { Text("同步（${modeLabel(defaultSyncMode)}）") }
-                                OutlinedButton(
-                                    onClick = { runSync(SyncMode.FULL) },
-                                    modifier = Modifier.weight(1f),
-                                ) { Text("全量") }
-                            }
-                        }
-
-                        result?.let {
-                            Text(
-                                it.text,
-                                style = MaterialTheme.typography.bodySmall,
-                                modifier = Modifier.padding(top = 6.dp),
-                            )
-                            if (it.errors.isNotEmpty()) {
-                                Text(
-                                    it.errors.joinToString("\n"),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.error,
-                                    modifier = Modifier.padding(top = 2.dp),
-                                )
-                            }
-                        }
-
-                        TextButton(
-                            onClick = {
-                                scope.launch {
-                                    session.disconnect()
-                                    watchInfo = null
-                                    bundle = null
-                                    settings = emptyList()
-                                    result = null
-                                }
-                            },
-                            modifier = Modifier.fillMaxWidth(),
-                        ) { Text("断开连接") }
-                    }
-
-                    is LinkState.Connecting -> {
-                        Text("正在连接…", style = MaterialTheme.typography.bodySmall)
-                        LinearProgressIndicator(Modifier.fillMaxWidth().padding(top = 6.dp))
-                    }
-
-                    is LinkState.Failed -> {
-                        Text("连接失败：${st.reason}", style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.error)
-                        Button(onClick = { scan() }, enabled = !scanning) {
-                            Text(if (scanning) "扫描中…" else "重新扫描")
-                        }
-                    }
-
-                    else -> {
-                        // 已配对手表：直接连，不用每次扫 8 秒
-                        if (pairedAddress != null) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Column(Modifier.weight(1f)) {
-                                    Text("已配对：${pairedName ?: "CR-4"}", style = MaterialTheme.typography.bodyMedium)
-                                    Text(
-                                        pairedAddress,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
-                                }
-                                Button(
-                                    onClick = { if (permGranted) connectPaired() else launcher.launch(perms.toTypedArray()) },
-                                    enabled = btEnabled,
-                                ) { Text("连接") }
-                            }
-                            HorizontalDivider(Modifier.padding(vertical = 6.dp))
-                        }
-                        Text(
-                            when {
-                                !permGranted -> "需要蓝牙权限才能扫描/连接"
-                                pairedAddress != null -> "换一块表，或者配对信息失效时，重新扫描一次"
-                                else -> "点下面扫描附近的手表（广播名 Crest-CR4）"
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                        Button(
-                            onClick = { if (permGranted) scan() else launcher.launch(perms.toTypedArray()) },
-                            enabled = !scanning && btEnabled,
-                            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-                        ) { Text(if (scanning) "扫描中…（8 秒）" else "扫描手表") }
-
-                        if (devices.isNotEmpty()) {
-                            HorizontalDivider(Modifier.padding(vertical = 6.dp))
-                            devices.forEach { d ->
-                                val name = runCatching { d.device.name }.getOrNull() ?: "未知设备"
-                                Row(
-                                    Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween,
-                                ) {
-                                    Column(Modifier.weight(1f)) {
-                                        Text(name, style = MaterialTheme.typography.bodyMedium)
-                                        Text(
-                                            "${d.device.address} · ${d.rssi} dBm",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        )
-                                    }
-                                    TextButton(onClick = { connectAndInspect(d.device) }) { Text("连接") }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                message?.let {
-                    Text(
-                        it,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.padding(top = 4.dp),
-                    )
-                }
-                if (!btEnabled) {
-                    Text(
-                        "蓝牙未开启，先在系统设置里打开",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
-            }
-        }
-
-        // ---------------------------------------------------------------- 设置
-        if (settings.isNotEmpty()) {
-            item {
-                InfoCard("手表设置", "协议层能写的只有时间；其余项固件没开放写命令，如实标注") {
-                    settings.forEach { s ->
-                        SettingRow(s)
-                    }
-                    OutlinedButton(
-                        onClick = { syncClock() },
-                        modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
-                    ) { Text("把本机时间写到手表") }
-                    clockMessage?.let {
-                        Text(
-                            it,
-                            style = MaterialTheme.typography.labelSmall,
-                            modifier = Modifier.padding(top = 4.dp),
-                        )
-                    }
-                }
-            }
-        }
-
         // ---------------------------------------------------------------- 导入
         item {
             InfoCard("导入日志", "选 CR-4 导出的 .bin 文件，可多选；自动解析并入库，重复文件会跳过") {
@@ -456,11 +212,34 @@ fun DeviceScreen(
                 ) {
                     Text(if (importing) "正在导入…" else "选择文件导入")
                 }
-                if (importedCount > 0) {
-                    TextButton(onClick = onClearImported, modifier = Modifier.fillMaxWidth()) {
-                        Text("清空导入的 $importedCount 条（含手表同步）")
-                    }
+            }
+        }
+
+        // ---------------------------------------------------------------- 数据维护
+        // 这张卡跟蓝牙无关：不配对、不开蓝牙也要能用，所以不放在同步卡里，
+        // 也不跟着 importedCount 变化而整卡消失（0 条时按钮置灰即可）。
+        item {
+            InfoCard("数据维护", "清空会真删库里的行（内置演示数据保留），删了就找不回") {
+                OutlinedButton(
+                    onClick = { showClearConfirm = true },
+                    enabled = importedCount > 0 && !importing,
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = MaterialTheme.colorScheme.error,
+                    ),
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                ) {
+                    Text(
+                        if (importedCount > 0) "清空导入的数据（$importedCount 条）"
+                        else "没有可清空的数据"
+                    )
                 }
+                Text(
+                    "只清手表同步和文件导入的记录（内置数据保留）。这是真删库，" +
+                        "回收站里也找不回来，要留的请先导出原始 bin。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
             }
         }
 
@@ -491,129 +270,74 @@ fun DeviceScreen(
             }
         }
         item {
-            Button(
-                onClick = {
-                    refreshTick++
-                    if (!permGranted) launcher.launch(perms.toTypedArray())
-                },
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(if (permGranted) "刷新状态" else "请求 BLE 权限")
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(
+                    onClick = {
+                        refreshTick++
+                        if (!permGranted) launcher.launch(perms.toTypedArray())
+                    },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(if (permGranted) "刷新状态" else "申请蓝牙权限")
+                }
             }
         }
     }
 
-    // 配对成功后的选择：现在同步（增量/全量）还是稍后
-    if (showSyncPrompt) {
+    if (showClearConfirm) {
         AlertDialog(
-            onDismissRequest = { showSyncPrompt = false },
-            title = { Text("手表已配对") },
+            onDismissRequest = { showClearConfirm = false },
+            title = { Text("清空导入的数据？") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text(
-                        watchInfo?.let { deviceLine(it) } ?: (pairedName ?: "CR-4"),
-                        style = MaterialTheme.typography.bodyMedium,
-                    )
-                    bundle?.let { b ->
-                        Text(
-                            "建议：${if (b.plan.kind == PlanKind.UP_TO_DATE) "已是最新，无需同步" else "${modeLabel(defaultSyncMode)}，${b.plan.steps} 条"}",
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                        Text(
-                            b.plan.reason,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    Text(
-                        "不下载的话，本地数据不会变；随时可以在这一页再点同步。",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+                Text(
+                    "将从数据库里删除 $importedCount 条手表同步 / 文件导入记录及其采样点，" +
+                        "这一步不可撤销，回收站也找不回来。内置数据会保留。"
+                )
             },
             confirmButton = {
-                Button(
-                    enabled = !syncing,
-                    onClick = { runSync(defaultSyncMode) },
-                ) { Text("${modeLabel(defaultSyncMode)}同步") }
+                TextButton(
+                    onClick = {
+                        showClearConfirm = false
+                        onClearImported()
+                    },
+                ) { Text("确认清空", color = MaterialTheme.colorScheme.error) }
             },
             dismissButton = {
-                Row {
-                    TextButton(enabled = !syncing, onClick = { runSync(SyncMode.FULL) }) { Text("全量同步") }
-                    TextButton(onClick = { showSyncPrompt = false }) { Text("稍后") }
-                }
+                TextButton(onClick = { showClearConfirm = false }) { Text("取消") }
             },
         )
     }
 }
 
-/** 同步模式的中文短名。 */
-private fun modeLabel(m: SyncMode): String = when (m) {
-    SyncMode.AUTO -> "自动"
-    SyncMode.INCREMENTAL -> "增量"
-    SyncMode.FULL -> "全量"
+/** 时间戳 -> "MM-dd HH:mm"。 */
+private fun stampOf(r: SyncRunRecord): String {
+    if (r.startedAt <= 0) return "—"
+    val t = java.time.Instant.ofEpochMilli(r.startedAt)
+        .atZone(java.time.ZoneId.systemDefault())
+    return "%02d-%02d %02d:%02d".format(t.monthValue, t.dayOfMonth, t.hour, t.minute)
 }
 
-/** 同步计划的展示：为什么走全量/增量，要下多少条。 */
-@Composable
-private fun PlanCard(plan: SyncPlan) {
-    val (title, color) = when {
-        plan.kind == PlanKind.UP_TO_DATE ->
-            "已是最新" to MaterialTheme.colorScheme.onSurfaceVariant
-        plan.kind == PlanKind.INCREMENTAL ->
-            "增量：${plan.steps} 条" to MaterialTheme.colorScheme.primary
-        plan.fallback -> "降级全量：${plan.steps} 条" to MaterialTheme.colorScheme.error
-        else -> "全量：${plan.steps} 条" to MaterialTheme.colorScheme.primary
+/** 一次同步的结果摘要。 */
+private fun runBrief(r: SyncRunRecord): String {
+    val mode = when (r.mode.uppercase()) {
+        "FULL" -> "全量"
+        "INCREMENTAL" -> "增量"
+        else -> "自动"
     }
-    Text(title, style = MaterialTheme.typography.titleSmall, color = color)
-    Text(
-        plan.reason,
-        style = MaterialTheme.typography.labelSmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-    )
-}
-
-@Composable
-private fun SettingRow(s: WatchSetting) {
-    Column(Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(
-                s.label,
-                style = MaterialTheme.typography.bodySmall,
-                color = if (s.supported) MaterialTheme.colorScheme.onSurface
-                else MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text(
-                when {
-                    !s.supported -> "不可写"
-                    s.value != null -> s.value
-                    else -> "—"
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = if (s.supported) MaterialTheme.colorScheme.onSurface
-                else MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        s.note?.let {
-            Text(
-                it,
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
+    val parts = buildString {
+        if (r.added > 0) append("新增 ${r.added}")
+        if (r.updated > 0) append(if (isEmpty()) "更新 ${r.updated}" else "，更新 ${r.updated}")
+        if (r.skipped > 0) append(if (isEmpty()) "跳过 ${r.skipped}" else "，跳过 ${r.skipped}")
+        if (r.failed > 0) append(if (isEmpty()) "失败 ${r.failed}" else "，失败 ${r.failed}")
     }
+    return "$mode · " + if (parts.isEmpty()) "无变化" else parts
 }
-
-/** 一行展示设备档案：条数 / 最新编号 / 序列号。 */
-private fun deviceLine(info: WatchInfo): String =
-    "${info.ndives} 条 · 最新 #${info.lastIndex} · ${info.deviceId}"
 
 @Composable
 private fun InfoCard(title: String, subtitle: String?, content: @Composable () -> Unit) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
         Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(title, style = MaterialTheme.typography.titleSmall)
+            Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
             subtitle?.let {
                 Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }

@@ -133,4 +133,26 @@ class SummaryOnlyTest {
         assertEquals(fromProfile, fromSummary, 1e-9)
         assertTrue("平均深度应落在最大深度以内", fromSummary <= 18.0)
     }
+
+    @Test
+    fun `采样点总数走摘要列而不是已载入的剖面`() {
+        // 回归：剖面改成按需载入后，totalSamples 若还数 samples（启动时是空的）
+        // 设备页 / 设置页就会显示「采样点 0」。
+        val ds = DiveDataSet(
+            dives = listOf(
+                dive("a", "2026-10-01 10:00:00", 1200, 18.0, avgDepth = 9.0, nsamples = 120),
+                dive("b", "2026-10-02 10:00:00", 1800, 22.0, avgDepth = 11.0, nsamples = 240),
+            ),
+            samples = emptyMap(),
+        )
+        assertEquals(360, ds.totalSamples)
+
+        // 部分载入也不应让总数变少
+        val partial = ds.copy(
+            samples = mapOf(
+                "a" to listOf(Sample(0, 0.0, null), Sample(60, 5.0, null)),
+            ),
+        )
+        assertEquals(360, partial.totalSamples)
+    }
 }

@@ -39,10 +39,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 
 /**
- * 日志列表：年份/月份筛选 + 收藏筛选 + 筛选后的统计 + 多选合并 + 长按快捷操作。
+ * 日志列表：年份/月份筛选 + 收藏筛选 + 筛选后的统计 + 多选（合并 / 批量删除）+ 长按快捷操作。
  *
  * 顶部三联指标永远是**当前筛选结果**的统计（不是全库），这样切到"2024 年 10 月"
  * 就能立刻看到那个月的潜次和累计时长。
+ *
+ * 多选模式同时管两件事：合并成一次、批量删除。全选只作用于**当前筛选结果**，
+ * 筛完 "2024 年" 再全选，删的就是那一年，不会把整库带走。
  *
  * 长按一条记录会就地展开两个图标（收藏 / 删除），不弹菜单：
  * 手机上一只手就能点，也不会遮住列表。
@@ -56,6 +59,8 @@ fun DiveListScreen(
     onMergeSelected: (List<DiveEntry>) -> Unit,
     onToggleFavorite: (DiveEntry) -> Unit,
     onDelete: (DiveEntry) -> Unit,
+    /** 批量删除：删除只是打标，条目进回收站。 */
+    onDeleteSelected: (List<DiveEntry>) -> Unit = {},
     /** 剖面后台载入进度（null = 已载完，不显示进度条）。 */
     profileProgress: Float? = null,
     profileLoaded: Int = 0,
@@ -93,21 +98,21 @@ fun DiveListScreen(
             item {
                 FilterChip(
                     selected = year == null,
-                    onClick = { year = null; month = null; selecting = false },
+                    onClick = { year = null; month = null; selecting = false; selected = emptySet() },
                     label = { Text("全部年份") },
                 )
             }
             items(years) { y ->
                 FilterChip(
                     selected = year == y,
-                    onClick = { year = y; month = null; selecting = false },
+                    onClick = { year = y; month = null; selecting = false; selected = emptySet() },
                     label = { Text("$y") },
                 )
             }
             item {
                 FilterChip(
                     selected = favOnly,
-                    onClick = { favOnly = !favOnly },
+                    onClick = { favOnly = !favOnly; selected = emptySet() },
                     label = { Text("★ 收藏") },
                 )
             }
@@ -130,51 +135,75 @@ fun DiveListScreen(
                 items(months) { m ->
                     FilterChip(
                         selected = month == m,
-                        onClick = { month = m },
+                        onClick = { month = m; selected = emptySet() },
                         label = { Text("${m}月") },
                     )
                 }
             }
         }
 
-        // 操作行：合并合并 / 选中态操作 / 右侧记录数
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
+        // 操作行：非选中态给「多选」入口；选中态给全选 / 批量删除 / 合并
+        Column(Modifier.fillMaxWidth().padding(horizontal = 6.dp)) {
             if (!selecting) {
-                TextButton(onClick = { selecting = true; pressed = null }) { Text("多选合并") }
-                Text(
-                    "长按一条可收藏 / 删除",
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(start = 6.dp),
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(onClick = { selecting = true; pressed = null }) { Text("多选") }
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        "$rawCount 条 → ${entries.size} 组",
+                        Modifier.padding(end = 10.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             } else {
-                Text(
-                    "已选 ${selected.size} 组",
-                    Modifier.padding(start = 10.dp),
-                    style = MaterialTheme.typography.labelLarge,
-                )
-                Spacer(Modifier.weight(1f))
-                TextButton(
-                    enabled = selected.size >= 2,
-                    onClick = {
-                        onMergeSelected(entries.filter { it.id in selected })
-                        selected = emptySet()
-                        selecting = false
-                    },
-                ) { Text("合并为一次") }
-                TextButton(onClick = { selected = emptySet(); selecting = false }) { Text("取消") }
-            }
-            Spacer(Modifier.weight(1f))
-            if (!selecting) {
-                Text(
-                    "$rawCount 条 → ${entries.size} 组",
-                    Modifier.padding(end = 10.dp),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                val allSelected = shown.isNotEmpty() && shown.all { it.id in selected }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "已选 ${selected.size} 组",
+                        Modifier.padding(start = 10.dp),
+                        style = MaterialTheme.typography.labelLarge,
+                    )
+                    Spacer(Modifier.weight(1f))
+                    TextButton(
+                        onClick = {
+                            selected = if (allSelected) emptySet() else shown.mapTo(HashSet()) { it.id }
+                        },
+                    ) { Text(if (allSelected) "取消全选" else "全选") }
+                    TextButton(onClick = { selected = emptySet(); selecting = false }) { Text("取消") }
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    TextButton(
+                        enabled = selected.isNotEmpty(),
+                        onClick = {
+                            // 用 entries 而不是 shown：勾选后如果又切了筛选，
+                            // 用 shown 会漏删「已选但不是当前筛选」的那几条。
+                            onDeleteSelected(entries.filter { it.id in selected })
+                            selected = emptySet()
+                            selecting = false
+                        },
+                    ) {
+                        Text(
+                            "删除选中" + if (selected.isNotEmpty()) "（${selected.size}）" else "",
+                            color = if (selected.isNotEmpty()) MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    TextButton(
+                        enabled = selected.size >= 2,
+                        onClick = {
+                            onMergeSelected(entries.filter { it.id in selected })
+                            selected = emptySet()
+                            selecting = false
+                        },
+                    ) { Text("合并为一次") }
+                    Spacer(Modifier.weight(1f))
+                    Text(
+                        "回收站可找回",
+                        Modifier.padding(end = 10.dp),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         }
 
@@ -207,7 +236,7 @@ fun DiveListScreen(
             if (shown.isEmpty()) {
                 item {
                     Text(
-                        if (favOnly) "还没有收藏的潜水：长按一条记录，点星标即可收藏"
+                        if (favOnly) "还没有收藏的潜水"
                         else "当前筛选下没有潜水记录",
                         Modifier.fillMaxWidth().padding(24.dp),
                         style = MaterialTheme.typography.bodyMedium,
