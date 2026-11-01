@@ -55,7 +55,12 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
                 -- v3：摘要列。入库时按采样点算好，列表只读这些列，不必回扫 sample 表
                 avg_depth_m   REAL NOT NULL DEFAULT 0,
                 temp_max_c    REAL,
-                gas_count     INTEGER NOT NULL DEFAULT 0
+                gas_count     INTEGER NOT NULL DEFAULT 0,
+                -- v4：用户补充的简要信息（手表读不到，只能手填）
+                site_name     TEXT,
+                visibility_m  REAL,
+                suit          TEXT,
+                site_tags     TEXT
             )
             """.trimIndent()
         )
@@ -140,6 +145,13 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
             db.execSQL("ALTER TABLE dive ADD COLUMN temp_max_c REAL")
             db.execSQL("ALTER TABLE dive ADD COLUMN gas_count INTEGER NOT NULL DEFAULT 0")
         }
+        // v3 -> v4：用户补充的简要信息。全是可空列，老数据自然"没填过"。
+        if (oldVersion < 4) {
+            db.execSQL("ALTER TABLE dive ADD COLUMN site_name TEXT")
+            db.execSQL("ALTER TABLE dive ADD COLUMN visibility_m REAL")
+            db.execSQL("ALTER TABLE dive ADD COLUMN suit TEXT")
+            db.execSQL("ALTER TABLE dive ADD COLUMN site_tags TEXT")
+        }
     }
 
     // ------------------------------------------------------------------ 写入
@@ -166,8 +178,9 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
                 (id, source, device_id, watch_index, fingerprint, dive_no, datetime, divetime_s,
                  maxdepth_m, temp_min_c, nsamples, bytes, raw_path, imported_at,
                  group_id, merge_kind, filter_reason, user_deleted, favorite,
-                 gas_o2, gas_he, gas_src, avg_depth_m, temp_max_c, gas_count)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                 gas_o2, gas_he, gas_src, avg_depth_m, temp_max_c, gas_count,
+                 site_name, visibility_m, suit, site_tags)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """.trimIndent()
             )
             val sSql = db.compileStatement(
@@ -195,6 +208,12 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
                         userDeleted = m.userDeleted || old.userDeleted,
                         groupId = m.groupId ?: old.groupId,
                         mergeKind = if (m.mergeKind != MergeKind.NONE) m.mergeKind else old.mergeKind,
+                        /* 手填的潜点/能见度/穿着/标签同样属于用户意图：
+                         * 新解析结果里这几列永远是空的，不带上就是"重同步一次全丢"。 */
+                        siteName = old.siteName ?: m.siteName,
+                        visibilityM = old.visibilityM ?: m.visibilityM,
+                        suit = old.suit ?: m.suit,
+                        tags = if (old.tags.isNotEmpty()) old.tags else m.tags,
                     )
                 }
                 dSql.clearBindings()
@@ -223,6 +242,10 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
                 dSql.bindDouble(23, d.avgDepthM)
                 bindNullableDouble(dSql, 24, d.tempMaxC)
                 dSql.bindLong(25, d.gasCount.toLong())
+                bindNullableText(dSql, 26, m.siteName)
+                bindNullableDouble(dSql, 27, m.visibilityM)
+                bindNullableText(dSql, 28, m.suit?.code)
+                bindNullableText(dSql, 29, DiveTag.join(m.tags))
                 dSql.executeInsert()
 
                 delS.bindString(1, d.file)
@@ -272,6 +295,37 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
                 st.clearBindings()
                 st.bindLong(1, if (favorite) 1 else 0)
                 st.bindString(2, id)
+                st.executeUpdateDelete()
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+    }
+
+    /**
+     * 写回用户补充的简要信息（潜点 / 能见度 / 穿着 / 类型标签）。
+     *
+     * 整块覆盖写，不做字段级 merge：详情页提交的是"这一屏看到的内容"，
+     * 拆成四次 UPDATE 反而会出现中途失败只写了一半的坏状态。
+     */
+    fun setAnnotation(ids: Collection<String>, a: DiveAnnotation) {
+        if (ids.isEmpty()) return
+        val db = writableDatabase
+        val site = a.siteName?.trim()?.takeIf { it.isNotEmpty() }
+        val tags = DiveTag.join(a.tags)
+        db.beginTransaction()
+        try {
+            val st = db.compileStatement(
+                "UPDATE dive SET site_name = ?, visibility_m = ?, suit = ?, site_tags = ? WHERE id = ?"
+            )
+            for (id in ids) {
+                st.clearBindings()
+                bindNullableText(st, 1, site)
+                bindNullableDouble(st, 2, a.visibilityM)
+                bindNullableText(st, 3, a.suit?.code)
+                bindNullableText(st, 4, tags)
+                st.bindString(5, id)
                 st.executeUpdateDelete()
             }
             db.setTransactionSuccessful()
@@ -602,7 +656,8 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
         val out = HashMap<String, DiveMeta>(512)
         readableDatabase.rawQuery(
             "SELECT id, source, device_id, watch_index, fingerprint, group_id, merge_kind, " +
-                "filter_reason, user_deleted, raw_path, imported_at, favorite, gas_o2, gas_he, gas_src FROM dive",
+                "filter_reason, user_deleted, raw_path, imported_at, favorite, gas_o2, gas_he, gas_src, " +
+                "site_name, visibility_m, suit, site_tags FROM dive",
             null
         ).use { c ->
             while (c.moveToNext()) {
@@ -623,6 +678,10 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
                     gasO2 = if (c.isNull(12)) null else c.getDouble(12),
                     gasHe = if (c.isNull(13)) null else c.getDouble(13),
                     gasSource = GasSource.of(if (c.isNull(14)) null else c.getString(14)),
+                    siteName = if (c.isNull(15)) null else c.getString(15),
+                    visibilityM = if (c.isNull(16)) null else c.getDouble(16),
+                    suit = SuitKind.of(if (c.isNull(17)) null else c.getString(17)),
+                    tags = DiveTag.parse(if (c.isNull(18)) null else c.getString(18)),
                 )
             }
         }
@@ -649,7 +708,8 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
     /** 覆盖前要保留的用户标记。 */
     private fun oldMarkers(db: SQLiteDatabase, id: String): DiveMeta? =
         db.rawQuery(
-            "SELECT favorite, gas_o2, gas_he, gas_src, user_deleted, group_id, merge_kind FROM dive WHERE id = ?",
+            "SELECT favorite, gas_o2, gas_he, gas_src, user_deleted, group_id, merge_kind, " +
+                "site_name, visibility_m, suit, site_tags FROM dive WHERE id = ?",
             arrayOf(id)
         ).use { c ->
             if (!c.moveToFirst()) return null
@@ -663,6 +723,10 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
                 userDeleted = c.getInt(4) != 0,
                 groupId = if (c.isNull(5)) null else c.getString(5),
                 mergeKind = MergeKind.of(if (c.isNull(6)) null else c.getString(6)),
+                siteName = if (c.isNull(7)) null else c.getString(7),
+                visibilityM = if (c.isNull(8)) null else c.getDouble(8),
+                suit = SuitKind.of(if (c.isNull(9)) null else c.getString(9)),
+                tags = DiveTag.parse(if (c.isNull(10)) null else c.getString(10)),
             )
         }
 
@@ -835,7 +899,9 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
 
     companion object {
         const val DB_NAME = "divelog.db"
-        const val DB_VERSION = 3
+
+        /** v4：用户补充信息（潜点/能见度/穿着/类型标签）四列。 */
+        const val DB_VERSION = 4
     }
 }
 

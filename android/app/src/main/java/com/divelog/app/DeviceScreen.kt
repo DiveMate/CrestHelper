@@ -243,30 +243,37 @@ fun DeviceScreen(
             }
         }
 
-        // ---------------------------------------------------------------- 环境
+        // ---------------------------------------------------------------- 环境 + 构建
+        // 这两块是排查用的，日常没人看，合并成一张**默认折叠**的卡：
+        // 收起时只留一行摘要（系统版本 + 机型 + 原生库是否加载），点开才是明细。
         item {
-            InfoCard("运行环境", null) {
-                Line("Android", "${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
-                Line("设备", "${Build.MANUFACTURER} ${Build.MODEL}")
-                Line("ABI", Build.SUPPORTED_ABIS.joinToString(", ") { it.substringAfter('-') })
-                Line("蓝牙", when {
-                    adapter == null -> "不支持"
-                    btEnabled -> "已开启"
-                    else -> "已关闭"
-                })
-                Line("权限", if (permGranted) "已授予" else "未授予")
+            var expanded by remember { mutableStateOf(false) }
+            // 版本号只在 .so 加载状态变化时取一次，不要放在 if 里（否则每次展开都会重新 JNI 调用）
+            val nativeVer = remember(soLoaded) {
+                if (soLoaded) runCatching { DiveParser.nativeVersion() }.getOrElse { "调用失败" } else "—"
             }
-        }
-        item {
-            InfoCard("构建状态", null) {
-                Line("Kotlin/Compose", "已加载")
-                Line("libdc (.so)", if (soLoaded) "已加载" else "未加载")
-                Line(
-                    "libdc 版本",
-                    if (soLoaded) {
-                        remember { runCatching { DiveParser.nativeVersion() }.getOrElse { "调用失败" } }
-                    } else "—"
-                )
+            InfoCard("运行环境与构建", if (expanded) null else envSummary(soLoaded)) {
+                TextButton(
+                    onClick = { expanded = !expanded },
+                    contentPadding = PaddingValues(0.dp),
+                ) {
+                    Text(if (expanded) "收起明细" else "展开明细")
+                }
+                if (expanded) {
+                    Line("Android", "${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})")
+                    Line("设备", "${Build.MANUFACTURER} ${Build.MODEL}")
+                    Line("ABI", Build.SUPPORTED_ABIS.joinToString(", ") { it.substringAfter('-') })
+                    Line("蓝牙", when {
+                        adapter == null -> "不支持"
+                        btEnabled -> "已开启"
+                        else -> "已关闭"
+                    })
+                    Line("权限", if (permGranted) "已授予" else "未授予")
+                    HorizontalDivider(Modifier.padding(vertical = 6.dp))
+                    Line("Kotlin/Compose", "已加载")
+                    Line("libdc (.so)", if (soLoaded) "已加载" else "未加载")
+                    Line("libdc 版本", nativeVer)
+                }
             }
         }
         item {
@@ -308,6 +315,11 @@ fun DeviceScreen(
         )
     }
 }
+
+/** 折叠时显示的一行摘要：系统版本 + 机型 + 原生库状态。 */
+private fun envSummary(soLoaded: Boolean): String =
+    "Android ${Build.VERSION.RELEASE} · ${Build.MODEL} · " +
+        if (soLoaded) "解析库已加载" else "解析库未加载"
 
 /** 时间戳 -> "MM-dd HH:mm"。 */
 private fun stampOf(r: SyncRunRecord): String {

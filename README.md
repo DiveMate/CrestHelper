@@ -93,7 +93,7 @@ CrestHelper/
 │   ├── app/src/test/                         L1 JVM 单测
 │   ├── app/src/androidTest/                  L3 真机仪器测试
 │   └── at.sh                                 一条命令跑完三层测试
-├── data/                     内置真实数据集（dives.csv / samples.csv）
+├── data/                     内置真实数据集（dives.csv 入库；samples.csv 本地生成、不入库）
 ├── raw/                      294 个原始 .bin（重新解析的唯一来源）
 ├── tools/                    桌面端脚本（探测、批量解析、算法对拍、图标生成）
 ├── web/                      手机尺寸 UI 原型（先定 UI 再平移安卓）
@@ -163,6 +163,21 @@ bash at.sh device   # 只跑真机仪器测试
 
 内置数据集来自真实设备：**253 条原始记录 → 按水面间隔合并为 198 组 → 过滤 13 条无效 → 185 条有效**，
 累计约 166.5 小时水下时间。口径与 `tools/analyze.py` 完全一致，App 与脚本可互相验证。
+
+### `samples.csv` 不入库
+
+`samples.csv` 是**逐点剖面**（每条潜水每 10 秒一个点），属于个人潜水轨迹，
+已经在 `.gitignore` 里排除，`git clone` 下来不会带这个文件。缺了它 App 照样能跑：
+列表、统计、筛选、同步全部正常，只是详情页**没有剖面曲线**（`nsamples` 归零，不会卡在"载入中"）。
+
+要补回来，从 `raw/` 重新生成一份、再复制进 assets：
+
+```bash
+python tools/batch_parse.py            # 产出 data/dives.csv + data/samples.csv
+cp data/samples.csv android/app/src/main/assets/
+```
+
+`dives.csv`（253 行摘要，31 KB）是入库的，所以开箱就有数据可看。
 
 ### `samples.csv` 为什么有 3 MB
 
@@ -327,7 +342,7 @@ CrestHelper/
 │   ├── app/src/test/                         L1 JVM unit tests
 │   ├── app/src/androidTest/                  L3 on-device instrumented tests
 │   └── at.sh                                 one command for all three test layers
-├── data/                     Bundled real dataset (dives.csv / samples.csv)
+├── data/                     Bundled real dataset (dives.csv tracked; samples.csv local-only)
 ├── raw/                      294 raw .bin dumps (the only source for re-parsing)
 ├── tools/                    Desktop scripts (probing, batch parsing, algorithm cross-check, icons)
 ├── web/                      Phone-sized UI prototype (design first, port to Android later)
@@ -395,6 +410,22 @@ bash at.sh device   # on-device instrumented tests only
 Bundled dataset comes from a real device: **253 raw records → merged by surface interval into
 198 groups → 13 invalid filtered out → 185 valid dives**, ≈166.5 hours underwater. The ruleset is
 identical to `tools/analyze.py`, so the app and the script can cross-check each other.
+
+### `samples.csv` is not in the repo
+
+`samples.csv` holds the **per-sample profiles** (one point every 10 s per dive) — that is personal
+dive-track data, so it is listed in `.gitignore` and will not be part of a `git clone`. The app
+runs fine without it: list, statistics, filters and sync all work; the detail view simply has
+**no profile curves** (`nsamples` is zeroed, so it never hangs on "loading profile").
+
+Regenerate it from `raw/` and copy it into assets:
+
+```bash
+python tools/batch_parse.py            # writes data/dives.csv + data/samples.csv
+cp data/samples.csv android/app/src/main/assets/
+```
+
+`dives.csv` (253 summary rows, 31 KB) *is* tracked, so a fresh clone still has data to browse.
 
 ### Why is `samples.csv` 3 MB?
 

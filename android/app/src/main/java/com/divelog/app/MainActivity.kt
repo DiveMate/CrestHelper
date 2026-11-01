@@ -46,6 +46,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.divelog.app.data.DiveAnnotation
 import com.divelog.app.sync.SyncMode
 import com.divelog.app.sync.WatchHub
 import kotlinx.coroutines.Dispatchers
@@ -280,6 +281,19 @@ fun DiveApp() {
         }
     }
 
+    /**
+     * 补充的简要信息（潜点 / 能见度 / 穿着 / 类型）。
+     *
+     * 合并组写整组：以后拆开合并，每一段仍然知道自己属于哪次潜水；
+     * 读的时候只认组内第一条（[DiveEntries.entry] 就是这么取的）。
+     */
+    fun setEntryAnnotation(e: DiveEntry, a: DiveAnnotation) {
+        scope.launch {
+            repo.setAnnotation(e.records.map { it.file }, a)
+            reload()
+        }
+    }
+
     // 详情页独占屏幕（避免和底部导航叠在一起）
     if (openEntry != null) {
         // 直接跳到某条记录：只补这一条的剖面（几百行、几毫秒），不必等全量载入
@@ -291,6 +305,7 @@ fun DiveApp() {
             deco = decoSettings,
             onDeco = { applyDeco(it) },
             onGas = { o2, he -> setEntryGas(openEntry, o2, he) },
+            onAnnotation = { setEntryAnnotation(openEntry, it) },
             onBack = { openId = null },
             canUnmerge = manualGroups.any { it.toSet() == openEntry.records.map { r -> r.file }.toSet() },
             onUnmerge = { unmerge(openEntry) },

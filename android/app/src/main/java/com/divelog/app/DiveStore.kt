@@ -1,6 +1,7 @@
 package com.divelog.app
 
 import android.content.Context
+import com.divelog.app.data.DiveAnnotation
 import com.divelog.app.data.DiveMeta
 import com.divelog.app.data.GasSource
 import com.divelog.app.sync.SyncMode
@@ -201,6 +202,8 @@ data class DiveEntry(
     val gasSource: GasSource? = null,
     /** 原始记录里出现过几种气体（>1 表示多气体潜水）。 */
     val gasCount: Int = 0,
+    /** 用户补充的简要信息（潜点 / 能见度 / 穿着 / 类型标签）。合并组取首条记录的。 */
+    val annotation: DiveAnnotation = DiveAnnotation(),
 ) {
     val primary: Dive get() = records.first()
     val mergedCount: Int get() = records.size
@@ -314,6 +317,7 @@ object DiveEntries {
             gas = gas,
             gasSource = gasSource,
             gasCount = distinctGasCount(ordered, metaOf, samplesOf),
+            annotation = metaOf(first)?.annotation ?: DiveAnnotation(),
         )
     }
 

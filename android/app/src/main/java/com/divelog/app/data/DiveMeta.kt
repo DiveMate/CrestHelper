@@ -39,7 +39,21 @@ data class DiveMeta(
     val gasHe: Double? = null,
     /** 气体值的来源。null = 没有值，按「全局默认气体」算。 */
     val gasSource: GasSource? = null,
+    /** 用户手填的潜点名称；null = 没填。 */
+    val siteName: String? = null,
+    /** 用户手填的能见度（米）；null = 没填。 */
+    val visibilityM: Double? = null,
+    /** 穿着：湿衣 / 干衣；null = 没记。 */
+    val suit: SuitKind? = null,
+    /** 潜水类型/环境标签（沙地、珊瑚礁、夜潜…），用户多选。 */
+    val tags: Set<DiveTag> = emptySet(),
 ) {
+    /** 用户补充的简要信息（详情页展示的那一块）。 */
+    val annotation: DiveAnnotation
+        get() = DiveAnnotation(siteName, visibilityM, suit, tags)
+
+    val hasAnnotation: Boolean get() = annotation.isNotEmpty
+
     val isMerged: Boolean get() = groupId != null && mergeKind != MergeKind.NONE
     val isFiltered: Boolean get() = filterReason != null
     val isNitrox: Boolean get() = (gasO2 ?: 0.0) > 0.215
@@ -53,6 +67,73 @@ data class DiveMeta(
             mergeKind == MergeKind.AUTO -> "自动合并"
             else -> null
         }
+}
+
+/**
+ * 用户补充的简要信息 —— 手表和 .bin 里都读不到，只能手记。
+ *
+ * 为什么单独抽一个类型而不是散在 [DiveMeta] 上加四个字段：
+ * 详情页一次写回的是"整块信息"，拆成四个 setter 会出现"改了潜点、
+ * 能见度被清空"的中间态，写库也会变成四次 UPDATE。
+ */
+data class DiveAnnotation(
+    val siteName: String? = null,
+    val visibilityM: Double? = null,
+    val suit: SuitKind? = null,
+    val tags: Set<DiveTag> = emptySet(),
+) {
+    val isNotEmpty: Boolean
+        get() = !siteName.isNullOrBlank() || visibilityM != null || suit != null || tags.isNotEmpty()
+}
+
+/** 穿着类型。 */
+enum class SuitKind(val code: String, val label: String) {
+    WET("wet", "湿衣"),
+    DRY("dry", "干衣"),
+    ;
+
+    companion object {
+        fun of(code: String?): SuitKind? = entries.firstOrNull { it.code == code }
+    }
+}
+
+/**
+ * 潜水类型 / 环境标签，**多选**。
+ *
+ * 海水和淡水互斥：同一次潜水不可能既是又都是，所以在界面上选了其中一个
+ * 会自动取消另一个（见 [DiveDetailScreen] 的标签 chip）。
+ * 其余三种（沙地 / 珊瑚礁 / 峭壁）可以同时成立 —— 峭壁上长着珊瑚是常态。
+ */
+enum class DiveTag(val code: String, val label: String) {
+    SAND("sand", "沙地"),
+    REEF("reef", "珊瑚礁"),
+    WALL("wall", "峭壁"),
+    NIGHT("night", "夜潜"),
+    SALT("salt", "海水"),
+    FRESH("fresh", "淡水"),
+    ;
+
+    /** 互斥组：同组内只能选一个。 */
+    val exclusiveGroup: String? get() = if (this == SALT || this == FRESH) "water" else null
+
+    companion object {
+        fun of(code: String): DiveTag? = entries.firstOrNull { it.code == code }
+
+        /** `"reef,night"` -> {REEF, NIGHT}，非法 code 直接丢弃。 */
+        fun parse(csv: String?): Set<DiveTag> =
+            csv?.split(',')?.mapNotNull { of(it.trim()) }?.toSet() ?: emptySet()
+
+        fun join(tags: Collection<DiveTag>): String? =
+            tags.takeIf { it.isNotEmpty() }?.joinToString(",") { it.code }
+
+        /** 选一个标签 -> 新集合（处理海水/淡水互斥）。 */
+        fun toggle(current: Set<DiveTag>, t: DiveTag): Set<DiveTag> {
+            if (t in current) return current - t
+            val g = t.exclusiveGroup
+            val kept = if (g == null) current else current.filter { it.exclusiveGroup != g }.toSet()
+            return kept + t
+        }
+    }
 }
 
 /**

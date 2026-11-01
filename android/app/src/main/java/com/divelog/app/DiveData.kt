@@ -2,6 +2,7 @@ package com.divelog.app
 
 import android.content.Context
 import com.divelog.app.data.AutoGroup
+import com.divelog.app.data.DiveAnnotation
 import com.divelog.app.data.DiveDb
 import com.divelog.app.data.DiveMeta
 import com.divelog.app.data.DiveRow
@@ -415,13 +416,21 @@ class DiveRepository(private val ctx: Context) {
         val now = System.currentTimeMillis()
         val rows = ArrayList<DiveRow>(300)
 
-        val builtinSamples = ctx.assets.open("samples.csv").bufferedReader().use { DiveCsv.parseSamples(it) }
+        /* samples.csv 是**逐点剖面**（6 万行，含个人潜水轨迹），默认不入库，
+         * 所以 clone 下来可能根本没有这个文件。这里按"有就用、没有就空"处理：
+         * 列表/统计靠 dives.csv 照常可用，详情页只是没有曲线，不会崩。
+         * 想补齐就 `python tools/batch_parse.py` 从 raw/ 重新生成一份放进 assets/。 */
+        val builtinSamples = runCatching {
+            ctx.assets.open("samples.csv").bufferedReader().use { DiveCsv.parseSamples(it) }
+        }.getOrElse { emptyMap() }
+
         ctx.assets.open("dives.csv").bufferedReader().use { reader ->
             for (d in DiveCsv.parseDives(reader)) {
                 val s = builtinSamples[d.file] ?: emptyList()
                 rows.add(
                     DiveRow(
-                        dive = d.withSummary(s),
+                        // 没有剖面时把 nsamples 归零：否则详情页会一直显示"剖面载入中"
+                        dive = d.withSummary(s).let { if (s.isEmpty()) it.copy(nsamples = 0) else it },
                         samples = s,
                         meta = DiveMeta(id = d.file, source = DiveSource.BUILTIN, importedAt = now),
                     )
@@ -578,6 +587,17 @@ class DiveRepository(private val ctx: Context) {
      */
     suspend fun setGas(id: String, o2: Double?, he: Double? = null) = withContext(Dispatchers.IO) {
         db.setGas(id, o2, he)
+        cached = null
+    }
+
+    /**
+     * 用户补充的简要信息（潜点 / 能见度 / 穿着 / 类型标签）。
+     *
+     * 合并组传进来的是组内全部记录 id，整组写同一份 —— 这样以后拆开合并，
+     * 每一段仍然知道自己属于哪次潜水。读的时候只取组内第一条。
+     */
+    suspend fun setAnnotation(ids: Collection<String>, a: DiveAnnotation) = withContext(Dispatchers.IO) {
+        db.setAnnotation(ids, a)
         cached = null
     }
 

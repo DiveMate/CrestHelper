@@ -203,12 +203,38 @@ class MarksSurviveSyncTest {
     }
 
     @Test
-    fun `库版本升级到 3 且新列可读写`() {
-        assertEquals(3, DiveDb.DB_VERSION)
+    fun `库版本升级到 4 且新列可读写`() {
+        assertEquals(4, DiveDb.DB_VERSION)
         db.insertAll(listOf(row("a", favorite = true)))
         // 能读到新列就说明建表语句与查询语句是同一套字段
         assertTrue(db.metaMap()["a"]!!.favorite)
         // v3 的摘要列也要能读回来（列表懒加载就靠它）
         assertEquals(0.0, db.allDives().single().avgDepthM, 1e-9)
+        // v4 的标注列：写进去要能原样读出来
+        db.setAnnotation(
+            listOf("a"),
+            DiveAnnotation(
+                siteName = "青龙湾",
+                visibilityM = 12.0,
+                suit = SuitKind.WET,
+                tags = setOf(DiveTag.REEF, DiveTag.SALT),
+            ),
+        )
+        val m = db.metaMap()["a"]!!
+        assertEquals("青龙湾", m.siteName)
+        assertEquals(12.0, m.visibilityM!!, 1e-9)
+        assertEquals(SuitKind.WET, m.suit)
+        assertEquals(setOf(DiveTag.REEF, DiveTag.SALT), m.tags)
+    }
+
+    @Test
+    fun `标注不会被重同步抹掉`() {
+        db.insertAll(listOf(row("a")))
+        db.setAnnotation(listOf("a"), DiveAnnotation(siteName = "大堡礁", suit = SuitKind.DRY))
+        // 手表又同步了一遍同一条
+        db.insertAll(listOf(row("a")))
+        val m = db.metaMap()["a"]!!
+        assertEquals("重同步后潜点名不能丢", "大堡礁", m.siteName)
+        assertEquals(SuitKind.DRY, m.suit)
     }
 }

@@ -2,6 +2,8 @@ package com.divelog.app
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -40,7 +42,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import com.divelog.app.data.DiveAnnotation
+import com.divelog.app.data.DiveTag
 import com.divelog.app.data.GasSource
+import com.divelog.app.data.SuitKind
 import kotlin.math.abs
 
 /**
@@ -65,6 +70,8 @@ fun DiveDetailScreen(
     onBack: () -> Unit,
     canUnmerge: Boolean = false,
     onUnmerge: () -> Unit = {},
+    /** 用户补充的简要信息（潜点 / 能见度 / 穿着 / 类型标签）。 */
+    onAnnotation: (DiveAnnotation) -> Unit = {},
     /** 剖面快照（file -> 采样点）。缺失表示还没载入，不是"没有剖面"。 */
     samples: Map<String, List<Sample>> = emptyMap(),
     /** 后台是否还在补剖面，用于把「载入中」和「确实没有剖面」区分开。 */
@@ -87,6 +94,7 @@ fun DiveDetailScreen(
     val minTemp = series.mapNotNull { it.temp }.minOrNull() ?: entry.tempMinC
     var showGas by remember(entry.id) { mutableStateOf(false) }
     var showGf by remember(entry.id) { mutableStateOf(false) }
+    var showInfo by remember(entry.id) { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -209,6 +217,13 @@ fun DiveDetailScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
 
+            // 用户补充的简要信息：手表和 .bin 里都读不到，只能自己记。
+            // 放在剖面图**上面**——先看"这是哪次潜水"，再往下才是曲线。
+            AnnotationCard(
+                annotation = entry.annotation,
+                onEdit = { showInfo = true },
+            )
+
             if (pending) {
                 // 摘要已经够画指标卡，但剖面还在后台补；不要拿空剖面画一张假图
                 Card {
@@ -295,6 +310,175 @@ fun DiveDetailScreen(
             onDismiss = { showGf = false },
         )
     }
+
+    if (showInfo) {
+        AnnotationDialog(
+            current = entry.annotation,
+            onSave = {
+                onAnnotation(it)
+                showInfo = false
+            },
+            onDismiss = { showInfo = false },
+        )
+    }
+}
+
+/**
+ * 「潜水信息」卡：只读展示已经填过的项，没填就提示一句。
+ *
+ * 为什么不直接放输入框：详情页本身是个长滚动列表，常驻四个输入框既占地方，
+ * 又会在每次重组时把焦点抢回去；点「填写/编辑」进对话框一次性提交更稳。
+ */
+@Composable
+private fun AnnotationCard(annotation: DiveAnnotation, onEdit: () -> Unit) {
+    val site = annotation.siteName?.trim()?.takeIf { it.isNotEmpty() }
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                Text(
+                    "潜水信息",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (!annotation.isNotEmpty) {
+                    Text(
+                        "潜点、能见度、穿着和类型都可以自己补，手表里没有这些",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else {
+                    if (site != null) InfoLine("潜点", site)
+                    annotation.visibilityM?.let { InfoLine("能见度", "${Fmt.one(it)} m") }
+                    annotation.suit?.let { InfoLine("穿着", it.label) }
+                    if (annotation.tags.isNotEmpty()) {
+                        InfoLine("类型", annotation.tags.sortedBy { it.ordinal }.joinToString(" · ") { it.label })
+                    }
+                }
+            }
+            TextButton(onClick = onEdit) {
+                Text(if (annotation.isNotEmpty) "编辑" else "填写")
+            }
+        }
+    }
+}
+
+/**
+ * 填信息：潜点、能见度、湿衣/干衣、类型标签（多选）。
+ *
+ * 一次提交整块内容 —— 取消就什么都不写，避免"改了一半"的半成品记录。
+ * 能见度允许留空（很多人记不住），填了就必须是 0~100 米之间的数。
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun AnnotationDialog(
+    current: DiveAnnotation,
+    onSave: (DiveAnnotation) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var site by remember { mutableStateOf(current.siteName ?: "") }
+    var visText by remember { mutableStateOf(current.visibilityM?.let { Fmt.one(it) } ?: "") }
+    var suit by remember { mutableStateOf(current.suit) }
+    var tags by remember { mutableStateOf(current.tags) }
+
+    val vis = if (visText.isBlank()) null else visText.toDoubleOrNull()
+    val visBad = visText.isNotBlank() && (vis == null || vis < 0 || vis > 100)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("潜水信息") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(
+                    value = site,
+                    onValueChange = { if (it.length <= 40) site = it },
+                    label = { Text("潜点") },
+                    placeholder = { Text("比如：三亚 蜈支洲岛") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = visText,
+                    onValueChange = { v ->
+                        if (v.all { it.isDigit() || it == '.' } && v.count { it == '.' } <= 1) visText = v
+                    },
+                    label = { Text("能见度") },
+                    suffix = { Text("m") },
+                    singleLine = true,
+                    isError = visBad,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (visBad) {
+                    Text(
+                        "填 0~100 之间的数字，或者留空",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+
+                Text("穿着", style = MaterialTheme.typography.labelMedium)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    SuitKind.entries.forEach { k ->
+                        FilterChip(
+                            selected = suit == k,
+                            onClick = { suit = if (suit == k) null else k },
+                            label = { Text(k.label) },
+                        )
+                    }
+                }
+
+                Text("类型（可多选）", style = MaterialTheme.typography.labelMedium)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    DiveTag.entries.forEach { t ->
+                        FilterChip(
+                            // 海水/淡水互斥由 DiveTag.toggle 处理，这里只管渲染
+                            selected = t in tags,
+                            onClick = { tags = DiveTag.toggle(tags, t) },
+                            label = { Text(t.label) },
+                        )
+                    }
+                }
+                Text(
+                    "海水和淡水只能选一个；沙地、珊瑚礁、峭壁可以同时成立。",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !visBad,
+                onClick = {
+                    onSave(
+                        DiveAnnotation(
+                            siteName = site.trim().takeIf { it.isNotEmpty() },
+                            visibilityM = vis,
+                            suit = suit,
+                            tags = tags,
+                        )
+                    )
+                },
+            ) { Text("保存") }
+        },
+        dismissButton = {
+            Row {
+                TextButton(
+                    onClick = {
+                        // 清空 = 回到"没填过"，不动原始记录
+                        site = ""
+                        visText = ""
+                        suit = null
+                        tags = emptySet()
+                        onSave(DiveAnnotation())
+                    },
+                ) { Text("清空") }
+                TextButton(onClick = onDismiss) { Text("取消") }
+            }
+        },
+    )
 }
 
 /**

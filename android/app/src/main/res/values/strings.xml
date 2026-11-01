@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">DiveLogger</string>
+    <!-- 对外名称与仓库/GitHub Release 保持一致：CrestHelper。
+         包名（applicationId）仍是 com.divelog.app，改了等于换一个新应用，
+         已安装的用户无法升级，所以只在显示名上统一。 -->
+    <string name="app_name">CrestHelper</string>
 </resources>
