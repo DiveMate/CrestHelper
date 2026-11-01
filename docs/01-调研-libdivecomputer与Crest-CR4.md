@@ -211,7 +211,7 @@ fdcdeaaa-... ScubaPro G2/G3      fe25c237-... Shearwater  1aa44039-... Perdix 3
 
 ```
 name    : Crest-CR4
-address : XX:XX:XX:XX:XX:XX   (随机地址，首字节高两位为 01)
+address : XX:XX:XX:XX:XX:XX   (随机私有地址：首字节高两位为 01，即 0x40~0x7F)
 adv     : service_uuids = ['0000ffc0-0000-1000-8000-00805f9b34fb',
                            '0000fff0-0000-1000-8000-00805f9b34fb']
 ```
