@@ -1,7 +1,7 @@
 # 调研报告：libdivecomputer 与 Crest CR-4
 
 > 调研时间：2026-10-10 · 仓库：`libdivecomputer/libdivecomputer@master`（`9e6c3c8`）
-> 本地已克隆到 `<workspace>/libdivecomputer`
+> 本地克隆位置：仓库根同级的 `libdivecomputer/`（或直接用 `third_party/libdivecomputer` 这个 submodule）
 
 ---
 
@@ -296,7 +296,7 @@ dive#2: header=156B profile=2312B fp=140b160e3621  -> 2468 B
 
 | # | 事项 | 状态 |
 |---|---|---|
-| 1 | 克隆 libdivecomputer 源码 | ✅ `<workspace>/libdivecomputer` |
+| 1 | 克隆 libdivecomputer 源码 | ✅ 已作为 submodule 放在 `third_party/libdivecomputer` |
 | 2 | 确认 CR-4 支持方式、协议、命令表 | ✅ 见本报告第 2–4 节 |
 | 3 | 确认「无内置 BLE」这个关键约束和补法 | ✅ 见第 5 节 |
 | 4 | Python `bleak` 安装（Windows BLE 栈） | ✅ 已装在托管 venv |
@@ -311,7 +311,7 @@ dive#2: header=156B profile=2312B fp=140b160e3621  -> 2468 B
 把 CR-4 开机（进入可配对/广播状态，别让官方 App 占着连接），然后在同一台机器上运行：
 
 ```bash
-cd <repo>/tools
+cd tools
 python cr4_probe.py scan        # 确认能看到 "Crest-CR4" 及其 MAC
 python cr4_probe.py probe       # dump 全部 GATT service / characteristic
 python cr4_probe.py info        # 读固件版本、序列号、潜水条数

@@ -71,10 +71,10 @@
 
 ### 2.5 安卓环境 ✅ 完成（可重跑）
 
-- 脚本 `$ANDROID_HOME-setup.sh`：JDK17（Temurin 17.0.20.1）+
+- 环境脚本 `android-sdk-setup.sh`（装 JDK17 Temurin 17.0.20.1 +
   cmdline-tools + platforms;android-34/35 + build-tools;34/35.0.0 +
-  platform-tools + NDK 27.0.12077973，整跑可重装。
-- 工具链：Gradle 8.7（`$GRADLE`）+ AGP 8.5.2 +
+  platform-tools + NDK 27.0.12077973，整跑可重装）。属于**本机环境脚本，不随仓库分发**。
+- 工具链：Gradle 8.7（`$GRADLE`，`at.sh` 会自动探测）+ AGP 8.5.2 +
   Kotlin 2.0.21 + Compose BOM 2024.09 + compileSdk/targetSdk 35 + minSdk 26 + Java 17。
 
 ### 2.6 Phase 1：Compose 骨架 ✅ 完成
@@ -366,7 +366,7 @@ python tools/analyze.py                          # 分析 → web/app-data.js
 python tools/deco.py                             # 减压内核自检（黄金值）
 
 # ===== 环境重装 =====
-bash $ANDROID_HOME-setup.sh                # SDK/JDK17/NDK 整跑重装
+bash android-sdk-setup.sh                       # SDK/JDK17/NDK 整跑重装（本机脚本）
 ```
 
 ---
