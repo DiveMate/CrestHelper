@@ -36,7 +36,7 @@ The stock app only moves data around and lists it. This project is for **risk re
 | Module | Notes |
 |---|---|
 | Parsing | libdivecomputer's `deepsix_excursion` parser built via NDK, exposed as JSON over JNI |
-| Dive list | Year filter, favourites, header stats, multi-select merge & batch delete (scoped to the current filter); reads summary columns only, profiles stream in behind |
+| Dive list | Year filter, favourites, header stats, multi-select merge & batch delete (scoped to the current filter) |
 | Recycle bin | Delete only sets `user_deleted`; records and samples stay. Restore one/many/all — **no permanent delete** |
 | Dive detail | Profile + temperature, max/avg depth, temperature extremes, **min safe depth**, **NDL remaining**, **GF99** curves, gas annotation, in-place GF editing; above the charts sits a **dive info** card (site, visibility, wetsuit/drysuit, terrain & water tags) |
 | Settings | Merge threshold, junk thresholds, direct GF pair (default 30/85), default gas, default sync mode, recycle-bin entry |
@@ -58,12 +58,12 @@ CrestHelper/
 │   ├── app/src/test/                         L1 JVM unit tests
 │   ├── app/src/androidTest/                  L3 on-device instrumented tests
 │   └── at.sh                                 one command for all three test layers
-├── data/                     Dataset (dives.csv tracked; samples.csv generated locally, not tracked)
+├── data/                     Dataset (dives.csv: one summary row per dive)
 ├── raw/                      3 raw .bin samples (for validating the parse chain)
 ├── tools/                    Desktop scripts (probing, batch parsing, algorithm cross-check, icons, web data)
 ├── web/                      Phone-sized UI prototype (design first, port to Android later)
 ├── build/                    Standalone parser without autotools (parse_cr4.c + build.sh)
-├── third_party/              libdivecomputer (git submodule, pinned to 9e6c3c8)
+├── third_party/              libdivecomputer (parser sources, reference protocol implementation)
 ├── docs/                     Research / architecture / algorithms / work log / sync design / tests
 └── docs/shots/               Screenshots used in this README (taken on a Galaxy S23)
 ```
@@ -73,7 +73,7 @@ CrestHelper/
 Requires JDK 17, Android SDK (platform 35), NDK 27.0.12077973, CMake 3.22.1.
 
 ```bash
-# 1) Fetch the third-party parser (submodule — not optional)
+# 1) Fetch the third-party parser sources (required, or the NDK build lacks headers)
 git submodule update --init --recursive
 
 # 2) Build
@@ -91,26 +91,6 @@ usually needs no script edits.
 > (it downloads `lint-gradle`). Add
 > `-x lintVitalAnalyzeRelease -x lintVitalReportRelease -x lintVitalRelease` to skip it —
 > the APK output is unaffected. Run a full lint once when the network allows.
-
-## About libdivecomputer: a submodule
-
-```
-third_party/libdivecomputer → https://github.com/libdivecomputer/libdivecomputer.git
-                                pinned to 9e6c3c8 "Add missing fields to the i770R parser"
-```
-
-- **The sources were extracted from the main repo, not removed.** Instead of copying 132 `.c`
-  files, the repo stores a gitlink to a fixed upstream commit. CMake still compiles those
-  sources into `libdcbridge.so` at build time.
-- **The pin is a real upstream commit**, not a local fork; the submodule working tree is clean,
-  so anyone running `git submodule update --init` gets byte-identical parser code.
-- **Why**: third-party code follows upstream, so its noise never shows up in this repo's diff.
-  Upgrading is a one-line pin change, visible in review.
-- **The cost**: patching `deepsix_excursion.c` would not land in this repo's history — you'd
-  have to push it to an upstream fork and move the pin here. That is also why this project
-  is read-only.
-- **Three-level fallback** in `android/app/src/main/cpp/CMakeLists.txt`:
-  `-DLDC_ROOT=` → `third_party/libdivecomputer` (submodule) → sibling `../libdivecomputer`.
 
 ## Testing
 
@@ -131,30 +111,30 @@ bash at.sh device   # on-device instrumented tests only
 
 ## Data
 
-`data/dives.csv` holds **summaries**: one row of numbers per dive (time, duration, max depth,
-water temperature) and is tracked. `data/samples.csv` holds the **per-sample profiles** (one
-point every 10 s); that is personal dive-track data, so it is listed in `.gitignore` and not
-tracked. Without it the app still runs — the detail view simply has no profile curves.
-Regenerate it from `raw/`:
+`data/dives.csv` holds **summaries**: one row of numbers per dive (index, start time, duration,
+max depth, lowest temperature). It is imported into SQLite on first launch and backs the list,
+the filters and the statistics.
+
+`raw/` ships 3 representative samples (deepest 34.7 m, longest 102 min, earliest from 2020),
+enough to prove the "raw bytes → parser → CSV" chain works. To re-run every `.bin`:
 
 ```bash
-python tools/batch_parse.py            # writes data/dives.csv + data/samples.csv
+bash build/build.sh          # build the standalone parser first (no autotools needed)
+python tools/batch_parse.py  # batch-parse raw/ and rewrite data/dives.csv
 ```
 
-`raw/` ships only 3 representative samples (deepest 34.7 m, longest 102 min, earliest from 2020),
-enough to prove the "raw bytes → parser → CSV" chain works. The full set is personal dive-track
-data and stays local, untracked.
-
-> Careful: `tools/batch_parse.py` generates CSVs from whatever is in `raw/`, so with only 3
-> samples a re-run overwrites the 253 summary rows in `data/dives.csv`. Put the full set back
-> into `raw/` first if you want the app to use all of it.
+`tools/dctool.py` is for single-record debugging, `tools/cr4_probe.py` for GATT probing.
 
 `web/app-data.js` is the prototype's demo dataset, produced by `tools/make_web_demo.py`:
 all summaries plus a handful of dives with profiles, 65 KB.
 
 ## Device protocol (CR-4)
 
-CR-4 uses BLE, and libdivecomputer has no BLE transport, so the app implements it:
+Field meanings and value ranges follow the `deepsix_excursion` parser in
+[libdivecomputer](https://github.com/libdivecomputer/libdivecomputer) — that implementation is
+compiled into this project's parsing layer, so it is the reference for protocol values.
+CR-4 talks BLE, which libdivecomputer has no transport for, so the app implements that part.
+The table below is measured:
 
 | Item | Value |
 |---|---|
@@ -166,15 +146,6 @@ CR-4 uses BLE, and libdivecomputer has no BLE transport, so the app implements i
 
 Command groups: `0xA0` device info, `0xB0` settings (date/time/storage/load), `0xC0` logs
 (count / index / header / profile).
-
-## Loading strategy: summaries first, profiles later
-
-The first screen reads only the `dive` table, one row per dive — average depth, temperature
-extremes and gas count are computed once at import time and stored as columns, so hundreds or
-thousands of rows both list in tens of milliseconds. Samples stream through a separate channel
-in chunks (40 dives per batch, newest first) with a "loaded / total" indicator. Opening a single
-dive only fetches that one (`ensure`, a few ms), so jumping back to the earliest year never
-waits for the whole set.
 
 ## Known limitations
 
