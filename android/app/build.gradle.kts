@@ -1,3 +1,4 @@
+import java.io.File
 import java.util.Properties
 
 plugins {
@@ -86,6 +87,44 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
+    }
+}
+
+// ---- 示例数据只进 debug 包 ---------------------------------------------------
+// 仓库根 data/ 里放着 253 条真实潜水记录（含 3 MB 逐点剖面）。那是个人潜水轨迹，
+// **发布包不能带**：release 变体压根不挂载这份数据，装出来是空库，
+// 靠蓝牙同步或导入 .bin 自己积累。
+//
+// 做法是"构建时从 data/ 拷一份"而不是"在模块里存一份副本"，避免两份 CSV 各自漂移。
+// samples.csv 不入库，clone 下来没有它 → 这里拷不到就只带 dives.csv（没曲线）。
+abstract class StageDemoAssets : DefaultTask() {
+    @get:InputFiles
+    abstract val sources: ConfigurableFileCollection
+
+    @get:OutputDirectory
+    abstract val output: DirectoryProperty
+
+    @TaskAction
+    fun stage() {
+        val out = output.get().asFile
+        out.mkdirs()
+        // 清掉上一轮残留：改了 data/ 之后不能留着旧样本
+        out.listFiles()?.forEach { it.delete() }
+        sources.files.filter { it.isFile }.forEach {
+            it.copyTo(File(out, it.name), overwrite = true)
+        }
+    }
+}
+
+val stageDemoAssets = tasks.register<StageDemoAssets>("stageDemoAssets") {
+    description = "把仓库根 data/*.csv 拷进 debug 包的 assets（release 不用）"
+    sources.from(fileTree(rootProject.projectDir.resolve("../data")) { include("*.csv") })
+    output.set(layout.buildDirectory.dir("generated/demoAssets"))
+}
+
+androidComponents {
+    onVariants(selector().withBuildType("debug")) { variant ->
+        variant.sources.assets?.addGeneratedSourceDirectory(stageDemoAssets, StageDemoAssets::output)
     }
 }
 

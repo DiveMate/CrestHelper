@@ -236,8 +236,12 @@ fun DiveListScreen(
             if (shown.isEmpty()) {
                 item {
                     Text(
-                        if (favOnly) "还没有收藏的潜水"
-                        else "当前筛选下没有潜水记录",
+                        when {
+                            // 完全没有记录（刚装好、release 包不带示例数据）和"筛选后为空"是两回事
+                            entries.isEmpty() -> "库里还没有记录。去「设备」页同步手表，或者导入 .bin 文件。"
+                            favOnly -> "还没有收藏的潜水"
+                            else -> "当前筛选下没有潜水记录"
+                        },
                         Modifier.fillMaxWidth().padding(24.dp),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,

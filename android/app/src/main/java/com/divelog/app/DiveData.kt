@@ -416,26 +416,30 @@ class DiveRepository(private val ctx: Context) {
         val now = System.currentTimeMillis()
         val rows = ArrayList<DiveRow>(300)
 
-        /* samples.csv 是**逐点剖面**（6 万行，含个人潜水轨迹），默认不入库，
-         * 所以 clone 下来可能根本没有这个文件。这里按"有就用、没有就空"处理：
-         * 列表/统计靠 dives.csv 照常可用，详情页只是没有曲线，不会崩。
-         * 想补齐就 `python tools/batch_parse.py` 从 raw/ 重新生成一份放进 assets/。 */
+        /* samples.csv 是**逐点剖面**（6 万行，含个人潜水轨迹），不入库，
+         * 所以 clone 下来、以及 release 包（只给 debug 带示例数据）里都没有这个文件。
+         * 这里按"有就用、没有就空"处理：列表/统计照常可用，详情页只是没有曲线，不会崩。
+         * 想补齐就 `python tools/batch_parse.py` 从 raw/ 重新生成一份放进 src/demo/assets/。 */
         val builtinSamples = runCatching {
             ctx.assets.open("samples.csv").bufferedReader().use { DiveCsv.parseSamples(it) }
         }.getOrElse { emptyMap() }
 
-        ctx.assets.open("dives.csv").bufferedReader().use { reader ->
-            for (d in DiveCsv.parseDives(reader)) {
-                val s = builtinSamples[d.file] ?: emptyList()
-                rows.add(
-                    DiveRow(
-                        // 没有剖面时把 nsamples 归零：否则详情页会一直显示"剖面载入中"
-                        dive = d.withSummary(s).let { if (s.isEmpty()) it.copy(nsamples = 0) else it },
-                        samples = s,
-                        meta = DiveMeta(id = d.file, source = DiveSource.BUILTIN, importedAt = now),
-                    )
+        /* dives.csv 同理：release 包不带示例数据，assets 里一个 CSV 都没有。
+         * 打不开就当"没有内置数据"，直接开一张空库 —— 用户自己去同步或导入。 */
+        val builtinDives = runCatching {
+            ctx.assets.open("dives.csv").bufferedReader().use { DiveCsv.parseDives(it) }
+        }.getOrElse { emptyList() }
+
+        for (d in builtinDives) {
+            val s = builtinSamples[d.file] ?: emptyList()
+            rows.add(
+                DiveRow(
+                    // 没有剖面时把 nsamples 归零：否则详情页会一直显示"剖面载入中"
+                    dive = d.withSummary(s).let { if (s.isEmpty()) it.copy(nsamples = 0) else it },
+                    samples = s,
+                    meta = DiveMeta(id = d.file, source = DiveSource.BUILTIN, importedAt = now),
                 )
-            }
+            )
         }
 
         // 旧版本用 CSV 存导入记录，这里搬进库（文件保留不删，出问题能回退）

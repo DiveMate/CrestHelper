@@ -44,7 +44,7 @@
 | 数据解析 | ✅ | libdivecomputer 的 `deepsix_excursion` 解析器经 NDK 编译，JNI 输出 JSON |
 | 日志列表 | ✅ | 年/月筛选、收藏筛选、顶栏联动统计、多选合并与**批量删除**（作用域=当前筛选结果）；只吃摘要，剖面后台分块载入 |
 | 回收站 | ✅ | 删除只打 `user_deleted` 标记，原始记录与采样点都还在；可单条/多选/全部恢复，**不提供彻底删除** |
-| 单次详情 | ✅ | 剖面 + 温度曲线、最大/平均深度、温度极值、**最大安全深度**与 **NDL** 实时曲线、气体标注、GF 就地调 |
+| 单次详情 | ✅ | 剖面 + 温度曲线、最大/平均深度、温度极值、**最大安全深度**与 **NDL** 实时曲线、气体标注、GF 就地调；曲线上方是**潜水信息**（潜点、能见度、湿衣/干衣、地形与水域多选） |
 | 设置 | ✅ | 合并阈值、垃圾阈值、**GF 两个值直配**（默认 30/85）、默认气体、同步默认模式、回收站入口 |
 | 统计 | ✅ | 年度/月度潜次、深度与时长直方图、水面间隔分布 |
 | 文件导入 | ✅ | SAF 多选 `.bin`，指纹去重，落库后与内置数据合并展示 |
@@ -63,20 +63,30 @@
 已构建并留档的安装包（**Galaxy S23 实机验证的那条构建线**，未签入仓库，走 Release 发）：
 
 ```
-dist/CrestHelper-0.1.0-arm64-v8a.apk         # release，已签名，可直接装
-dist/CrestHelper-0.1.0-arm64-v8a-debug.apk   # debug，带日志，排查用
+dist/CrestHelper-0.1.1-arm64-v8a.apk         # release，已签名，可直接装（不含示例数据）
 ```
 
 ```bash
-adb install -r dist/CrestHelper-0.1.0-arm64-v8a.apk
+adb install -r dist/CrestHelper-0.1.1-arm64-v8a.apk
 ```
+
+**两个包的数据不一样，这点很重要**：
+
+| 包 | 内置示例数据 | 说明 |
+|---|---|---|
+| release（发布用） | **没有** | 装完是空库，靠蓝牙同步或导入 `.bin` 自己积累。253 条真实潜水记录属个人轨迹，不随包发布 |
+| debug（自用/排查） | 有 | 构建时自动从仓库根 `data/*.csv` 拷进 assets，装完就能看到曲线和统计 |
+
+这条规则写在 `android/app/build.gradle.kts` 的 `stageDemoAssets` 里：只有 debug 变体挂载
+这个生成目录，release 变体压根不注册它，所以**不可能忘**。想要一个带数据的 release 包，
+把 `onVariants(selector().withBuildType("debug"))` 改成 `selector()` 再重打。
 
 发布成 GitHub Release（APK 不进 git 历史，`dist/` 已 gitignore）：
 
 ```bash
-gh release create v0.1.0 dist/*.apk \
-  --title "CrestHelper v0.1.0" \
-  --notes "适配 Crest CR-4；仅在三星 Galaxy S23（SM-S9110，Android 16）实机验证。"
+gh release create v0.1.1 dist/*.apk \
+  --title "CrestHelper v0.1.1" \
+  --notes "适配 Crest CR-4；仅在三星 Galaxy S23（SM-S9110，Android 16）实机验证。不含示例数据。"
 ```
 
 > **签名密钥**在 `android/keystore/cresthelper-release.jks`，口令在 `android/keystore.properties`
@@ -167,17 +177,20 @@ bash at.sh device   # 只跑真机仪器测试
 ### `samples.csv` 不入库
 
 `samples.csv` 是**逐点剖面**（每条潜水每 10 秒一个点），属于个人潜水轨迹，
-已经在 `.gitignore` 里排除，`git clone` 下来不会带这个文件。缺了它 App 照样能跑：
-列表、统计、筛选、同步全部正常，只是详情页**没有剖面曲线**（`nsamples` 归零，不会卡在"载入中"）。
+已经在 `.gitignore` 里排除；它还被 `git filter-branch` 从全部历史提交里抹掉了，
+所以 `git clone` 下来、`git log -p` 翻历史，都不会出现这份数据。
 
-要补回来，从 `raw/` 重新生成一份、再复制进 assets：
+`dives.csv`（253 行摘要，31 KB）是入库的，它只是每潜一行的数字（时间、时长、最大深度、
+水温），没有潜点也没有轨迹。两份 CSV 都不参与 release 打包 —— 见上文「拿一个装得上的 APK」。
+
+要补回来，从 `raw/` 重新生成一份即可（构建时自动拷进 debug 包）：
 
 ```bash
 python tools/batch_parse.py            # 产出 data/dives.csv + data/samples.csv
-cp data/samples.csv android/app/src/main/assets/
 ```
 
-`dives.csv`（253 行摘要，31 KB）是入库的，所以开箱就有数据可看。
+缺了 `samples.csv` App 照样能跑：列表、统计、筛选、同步全部正常，只是详情页**没有剖面曲线**
+（`nsamples` 归零，不会卡在"载入中"）。
 
 ### `samples.csv` 为什么有 3 MB
 
@@ -200,7 +213,7 @@ cp data/samples.csv android/app/src/main/assets/
 
 > `raw/` 里比内置数据集多出的部分是后续补下的历史日志（含 2 组重复下载，内容 md5 相同），
 > 内置数据集是更早的 253 条快照。重跑 `tools/batch_parse.py` 会得到 294 条 ——
-> 想让 App 吃全量，就把新的 `dives.csv` / `samples.csv` 复制进 `android/app/src/main/assets/`。
+> debug 包会自动拷 `data/*.csv`，所以换完数据直接重新构建即可。
 
 ## 设备协议（CR-4）
 
@@ -296,7 +309,7 @@ The stock app only moves data around and lists it. This project is for **risk re
 | Parsing | ✅ | libdivecomputer's `deepsix_excursion` parser built via NDK, exposed as JSON over JNI |
 | Dive list | ✅ | Year/month filters, favourites, header stats, multi-select merge & **batch delete** (scoped to the current filter); reads summary rows only, profiles stream in the background |
 | Recycle bin | ✅ | Delete only sets `user_deleted`; records and samples stay. Restore one/many/all — **no permanent delete** |
-| Dive detail | ✅ | Profile + temperature, max/avg depth, temperature extremes, **max safe depth** and **NDL** curves, gas annotation, in-place GF editing |
+| Dive detail | ✅ | Profile + temperature, max/avg depth, temperature extremes, **max safe depth** and **NDL** curves, gas annotation, in-place GF editing; above the charts sits a **dive info** card (site, visibility, wetsuit/drysuit, terrain & water tags) |
 | Settings | ✅ | Merge threshold, junk thresholds, **direct GF pair** (default 30/85), default gas, default sync mode, recycle-bin entry |
 | Statistics | ✅ | Yearly/monthly counts, depth & duration histograms, surface-interval distribution |
 | File import | ✅ | Multi-select `.bin` via SAF, fingerprint dedupe, merged with bundled data |
@@ -309,23 +322,33 @@ The stock app only moves data around and lists it. This project is for **risk re
 
 ## Installable APK
 
-Prebuilt packages, kept from the build line verified on the Galaxy S23 (not committed — `dist/` is gitignored):
+Prebuilt package, kept from the build line verified on the Galaxy S23 (not committed — `dist/` is gitignored):
 
 ```
-dist/CrestHelper-0.1.0-arm64-v8a.apk         # release, signed, install directly
-dist/CrestHelper-0.1.0-arm64-v8a-debug.apk   # debug, verbose logging
+dist/CrestHelper-0.1.1-arm64-v8a.apk         # release, signed, install directly (no sample data)
 ```
 
 ```bash
-adb install -r dist/CrestHelper-0.1.0-arm64-v8a.apk
+adb install -r dist/CrestHelper-0.1.1-arm64-v8a.apk
 ```
+
+**The two build types carry different data — this matters**:
+
+| Build | Bundled sample data | Notes |
+|---|---|---|
+| release (for publishing) | **none** | Installs as an empty library; fill it via BLE sync or `.bin` import. The 253 real dives are personal track data and are never shipped |
+| debug (local use) | yes | `data/*.csv` is copied into assets at build time, so curves and statistics work out of the box |
+
+This is enforced in `android/app/build.gradle.kts` (`stageDemoAssets`): only the debug variant mounts
+that generated assets directory, the release variant never registers it — so it cannot be forgotten.
+Need a release build *with* data? Change `selector().withBuildType("debug")` to `selector()`.
 
 Publish as a GitHub Release:
 
 ```bash
-gh release create v0.1.0 dist/*.apk \
-  --title "CrestHelper v0.1.0" \
-  --notes "Built for Crest CR-4; verified only on a Samsung Galaxy S23 (SM-S9110, Android 16)."
+gh release create v0.1.1 dist/*.apk \
+  --title "CrestHelper v0.1.1" \
+  --notes "Built for Crest CR-4; verified only on a Samsung Galaxy S23 (SM-S9110, Android 16). Ships without sample data."
 ```
 
 > **Signing key**: `android/keystore/cresthelper-release.jks`, credentials in
@@ -414,18 +437,21 @@ identical to `tools/analyze.py`, so the app and the script can cross-check each 
 ### `samples.csv` is not in the repo
 
 `samples.csv` holds the **per-sample profiles** (one point every 10 s per dive) — that is personal
-dive-track data, so it is listed in `.gitignore` and will not be part of a `git clone`. The app
-runs fine without it: list, statistics, filters and sync all work; the detail view simply has
-**no profile curves** (`nsamples` is zeroed, so it never hangs on "loading profile").
+dive-track data. It is listed in `.gitignore` *and* was stripped from every commit with
+`git filter-branch`, so neither a fresh `git clone` nor a `git log -p` will ever surface it.
 
-Regenerate it from `raw/` and copy it into assets:
+`dives.csv` (253 summary rows, 31 KB) *is* tracked — it is just one line of numbers per dive
+(time, duration, max depth, water temp), no site names and no track. Neither CSV ships in the
+release APK (see "Installable APK" above).
+
+Regenerate the profiles from `raw/` (the debug build then picks the files up automatically):
 
 ```bash
 python tools/batch_parse.py            # writes data/dives.csv + data/samples.csv
-cp data/samples.csv android/app/src/main/assets/
 ```
 
-`dives.csv` (253 summary rows, 31 KB) *is* tracked, so a fresh clone still has data to browse.
+Without `samples.csv` the app still runs: list, statistics, filters and sync all work; the detail
+view simply has **no profile curves** (`nsamples` is zeroed, so it never hangs on "loading profile").
 
 ### Why is `samples.csv` 3 MB?
 
@@ -450,7 +476,7 @@ scripts and the app: human-readable and directly diffable. If size ever matters,
 
 > `raw/` contains more than the bundled dataset: extra historical logs downloaded later (including
 > 2 duplicate downloads with identical md5). Re-running `tools/batch_parse.py` yields 294 records;
-> copy the new `dives.csv` / `samples.csv` into `android/app/src/main/assets/` to use the full set.
+> the debug build copies `data/*.csv` automatically, so just rebuild after refreshing the data.
 
 ## Device protocol (CR-4)
 
