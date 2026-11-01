@@ -21,7 +21,7 @@
 
 **记录整理**
 
-- 碎片合并：按水面间隔把中断的几次记录贯穿成一次潜水
+- 碎片合并：中途临时升水又下水，按水面间隔把中断的几次记录贯穿成一次潜水
 - 垃圾过滤：按深度/时长阈值筛掉误触发的记录
 - 回收站：删除只打标记，原始记录与采样点都还在，可单条 / 多选 / 全部恢复
 
@@ -41,7 +41,7 @@
 
 - 只支持 CR-4 系（同硬件贴牌：Deep Six Excursion / Genesis Centauri / Scorpena Alpha）的 `deepsix_excursion` 记录格式
 - 只在 Galaxy S23 上验证过，其他机型未测，问题请附机型 + Android 版本
-- 只做水肺模式，自由潜等其他模式未实现
+- 只做水肺模式，自由潜懒得搞了
 - 无账号、无云同步，数据全在本机 SQLite
 - 老记录不带气体信息，气体种类依赖手动标注
 
@@ -77,7 +77,7 @@ A third-party Android client for the **Crest CR-4** dive computer. The stock app
 
 **Cleanup**
 
-- Fragment merge — stitches interrupted logs back into one dive by surface interval
+- Fragment merge — breaking the surface mid-dive and going back down is stitched into one dive by surface interval
 - Junk filter — depth/duration thresholds drop accidental triggers
 - Recycle bin — deletion only sets a flag; restore one, many or all
 
@@ -97,7 +97,7 @@ A third-party Android client for the **Crest CR-4** dive computer. The stock app
 
 - CR-4 family only (`deepsix_excursion` format; rebadges: Deep Six Excursion / Genesis Centauri / Scorpena Alpha)
 - Verified on the Galaxy S23 only — please include model + Android version in reports
-- SCUBA mode only; freediving and other modes are not implemented
+- SCUBA mode only; freediving isn't worth the bother
 - No accounts, no cloud sync — everything stays in a local SQLite database
 - Older records carry no gas information, so gas type depends on manual annotation
 

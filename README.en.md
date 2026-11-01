@@ -42,15 +42,14 @@ So there is an algorithm settings page:
 ### 3. Cleaning up junk records
 
 - **Filter out very short dives** — depth/duration thresholds drop accidental triggers;
-- **Merge fragments** — an emergency ascent followed by a re-descent, or a brief deep dip
-  mid-dive, used to land as several separate logs; they are stitched back into **one dive**
-  by surface interval;
+- **Merge fragments** — breaking the surface mid-dive and going back down used to land as
+  several separate logs; they are stitched back into **one dive** by surface interval;
 - **Nothing is really deleted** — removal only sets a flag, records and samples stay put, and
   the recycle bin can bring them back.
 
 ### Status
 
-SCUBA mode only — freediving is out of scope and not planned. Phone compatibility was only ever
+SCUBA mode only — freediving isn't worth the bother. Phone compatibility was only ever
 tried on the author's own device; for anything else, clone it and let an AI agent debug it.
 The compatibility table below has the finer boundaries.
 
