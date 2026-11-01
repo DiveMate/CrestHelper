@@ -11,6 +11,49 @@
   <img src="docs/shots/04-device.png" width="180" alt="Device">
 </p>
 
+## Why this exists
+
+Two motivations, plus a few old annoyances fixed along the way.
+
+### 1. Syncing was slow
+
+The more dives you log, the worse it gets: the stock app **scans the entire logbook** before it
+downloads anything, and it only works while you sit on that screen. CR-4's BLE is slow to begin
+with, so one sync eats several minutes. Hence:
+
+- **Lightweight incremental download** — no full scan. It compares log headers, picks only the
+  entries the watch has but the phone does not, and pulls just those. Sync time drops from
+  "the whole logbook" to "the few new dives".
+- **Background download** — sync runs in a process-level engine plus a foreground service, so you
+  can switch pages, switch apps or lock the phone mid-sync and follow progress from the notification.
+
+### 2. Can a dive actually be reviewed afterwards?
+
+The computer's algorithm is a black box to its owner: did this dive cross into
+**decompression**? Was the **conservatism** at the time high or low? The watch never says.
+So there is an algorithm settings page:
+
+- **ZHL-16C** built in, with gradient factors (GF) you can set by hand, default **30/85** —
+  lower the low GF to be more conservative;
+- recomputes **NDL remaining**, **minimum safe depth** and the **GF99** curve from the real profile;
+- look back along the curve to see where that dive crossed the deco line, and whether the
+  conservatism you used was stricter than it needed to be.
+
+### 3. Cleaning up junk records
+
+- **Filter out very short dives** — depth/duration thresholds drop accidental triggers;
+- **Merge fragments** — an emergency ascent followed by a re-descent, or a brief deep dip
+  mid-dive, used to land as several separate logs; they are stitched back into **one dive**
+  by surface interval;
+- **Nothing is really deleted** — removal only sets a flag, records and samples stay put, and
+  the recycle bin can bring them back.
+
+### Status
+
+SCUBA mode only — freediving is out of scope and not planned. Phone compatibility was only ever
+tried on the author's own device; for anything else, clone it and let an AI agent debug it.
+The compatibility table below has the finer boundaries.
+
 ## Compatibility & testing notice — read this first
 
 | Item | Detail |
@@ -21,15 +64,6 @@
 | **APK ABI** | `arm64-v8a` only (`abiFilters`) — 32-bit devices cannot install it |
 
 > In short: **usable and verified along the CR-4 + Galaxy S23 path. Everything else counts as untested.**
-
-## What it is for
-
-The stock app only moves data around and lists it. This project is for **risk review**:
-
-- Recompute decompression with your own gradient factors (ZHL-16C + GF, default **30/85**, adjustable any time)
-- Recompute **NDL**, **max safe depth** and the **GF99** curve from the real profile
-- Merge fragmented logs by surface interval, detect and filter junk records
-- Everything is archived — deleting only sets a flag, and you can restore from the recycle bin
 
 ## Features
 
