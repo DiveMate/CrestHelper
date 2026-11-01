@@ -59,7 +59,7 @@ CrestHelper/
 │   ├── app/src/androidTest/                  L3 真机仪器测试
 │   └── at.sh                                 一条命令跑完三层测试
 ├── data/                     真实数据集（dives.csv 入库；samples.csv 本地生成、不入库）
-├── raw/                      294 个原始 .bin（重新解析的唯一来源）
+├── raw/                      3 条原始 .bin 样本（验证解析链路用）
 ├── tools/                    桌面端脚本（探测、批量解析、算法对拍、图标与网页数据生成）
 ├── web/                      手机尺寸 UI 原型（先定 UI 再平移安卓）
 ├── build/                    免 autotools 的独立解析器（parse_cr4.c + build.sh）
@@ -133,7 +133,12 @@ bash at.sh device   # 只跑真机仪器测试
 python tools/batch_parse.py            # 产出 data/dives.csv + data/samples.csv
 ```
 
-`raw/` 是 294 个从手表下载的原始 `.bin`（含少量重复下载），是重新解析的唯一来源。
+`raw/` 只带 3 条代表样本（最深 34.7 m、最长 102 min、最早 2020 年各一条），
+用于验证「原始字节 → 解析器 → CSV」这条链路跑得通。完整记录是个人潜水轨迹，留在本地不入库。
+
+> 注意：`tools/batch_parse.py` 是按 `raw/` 里现有的文件生成 CSV 的，
+> 只有 3 条样本时重跑会覆盖掉 `data/dives.csv` 的 253 行摘要。
+> 想让 App 吃全量，先把完整记录放回 `raw/` 再跑。
 
 `web/app-data.js` 是原型的演示数据，由 `tools/make_web_demo.py` 生成：
 摘要全量 + 少量带剖面的示例，65 KB。

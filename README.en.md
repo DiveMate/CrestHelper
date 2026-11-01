@@ -59,7 +59,7 @@ CrestHelper/
 │   ├── app/src/androidTest/                  L3 on-device instrumented tests
 │   └── at.sh                                 one command for all three test layers
 ├── data/                     Dataset (dives.csv tracked; samples.csv generated locally, not tracked)
-├── raw/                      294 raw .bin dumps (the only source for re-parsing)
+├── raw/                      3 raw .bin samples (for validating the parse chain)
 ├── tools/                    Desktop scripts (probing, batch parsing, algorithm cross-check, icons, web data)
 ├── web/                      Phone-sized UI prototype (design first, port to Android later)
 ├── build/                    Standalone parser without autotools (parse_cr4.c + build.sh)
@@ -141,8 +141,13 @@ Regenerate it from `raw/`:
 python tools/batch_parse.py            # writes data/dives.csv + data/samples.csv
 ```
 
-`raw/` contains the 294 raw `.bin` dumps downloaded from the watch (a few duplicate downloads
-included) and is the only source for re-parsing.
+`raw/` ships only 3 representative samples (deepest 34.7 m, longest 102 min, earliest from 2020),
+enough to prove the "raw bytes → parser → CSV" chain works. The full set is personal dive-track
+data and stays local, untracked.
+
+> Careful: `tools/batch_parse.py` generates CSVs from whatever is in `raw/`, so with only 3
+> samples a re-run overwrites the 253 summary rows in `data/dives.csv`. Put the full set back
+> into `raw/` first if you want the app to use all of it.
 
 `web/app-data.js` is the prototype's demo dataset, produced by `tools/make_web_demo.py`:
 all summaries plus a handful of dives with profiles, 65 KB.

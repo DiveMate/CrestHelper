@@ -35,6 +35,14 @@ web/app.json
 data/samples.csv
 android/app/src/main/assets/samples.csv
 
+# ---- 原始记录：仓库只带三条样本 ----
+# raw/ 里是从手表下载的原始 .bin（个人潜水轨迹）。公开仓库只保留三条代表样本
+# （最深 / 最长 / 最早各一条）用于验证解析链路，其余留本地、不入库。
+raw/*.bin
+!raw/cr4_dive00224_20261011_013812.bin
+!raw/cr4_dive00213_20261011_013854.bin
+!raw/cr4_dive00001_20261011_012350.bin
+
 # ---- 签名材料：绝不入库 ----
 *.keystore
 *.jks
