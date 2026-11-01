@@ -92,7 +92,7 @@ CrestHelper/
 │   ├── app/src/test/                         L1 JVM unit tests
 │   ├── app/src/androidTest/                  L3 on-device instrumented tests
 │   └── at.sh                                 one command for all three test layers
-├── data/                     Dataset (dives.csv: one summary row per dive)
+├── data/                     Sample dataset (dives.csv: 40 curated summaries, one row per dive)
 ├── raw/                      3 raw .bin samples (for validating the parse chain)
 ├── tools/                    Desktop scripts (probing, batch parsing, algorithm cross-check, icons, web data)
 ├── web/                      Phone-sized UI prototype (design first, port to Android later)
@@ -149,6 +149,11 @@ bash at.sh device   # on-device instrumented tests only
 max depth, lowest temperature). It is imported into SQLite on first launch and backs the list,
 the filters and the statistics.
 
+It contains **40 curated samples** drawn from a real CR-4 logbook — every year from 2020 to 2026,
+keeping the deepest 34.7 m, the longest 101 min, and a few one-to-two-second accidental triggers
+(so the junk filter has something to show). Only the summary numbers are kept: **no dive sites, no
+GPS, no per-sample profiles**.
+
 `raw/` ships 3 representative samples (deepest 34.7 m, longest 102 min, earliest from 2020),
 enough to prove the "raw bytes → parser → CSV" chain works. To re-run every `.bin`:
 
@@ -160,7 +165,7 @@ python tools/batch_parse.py  # batch-parse raw/ and rewrite data/dives.csv
 `tools/dctool.py` is for single-record debugging, `tools/cr4_probe.py` for GATT probing.
 
 `web/app-data.js` is the prototype's demo dataset, produced by `tools/make_web_demo.py`:
-all summaries plus a handful of dives with profiles, 65 KB.
+all 40 summaries plus 6 dives with profiles, 34 KB.
 
 ## Device protocol (CR-4)
 

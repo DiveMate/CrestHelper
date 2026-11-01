@@ -7,7 +7,7 @@
 公开仓库里只放**摘要**（每潜一行的数字，无潜点、无轨迹），
 再挑少量几条带剖面，够把界面跑起来、够看曲线就行。
 
-输入：data/dives.csv（摘要，253 行，入库）
+输入：data/dives.csv（摘要，40 条精选样本，入库）
       data/samples.csv（逐点剖面，不入库；缺了就只出摘要）
 输出：web/app-data.js
 
@@ -141,7 +141,7 @@ def main():
             "total_time_h": round(total_s / 3600.0, 1),
             "date_from": rows[-1]["dt"][:10] if rows else "",
             "date_to": rows[0]["dt"][:10] if rows else "",
-            "note": "摘要为全量；逐点剖面只挑了少量示例，个人轨迹不入库",
+            "note": "摘要为精选样本；逐点剖面只挑了少量示例，个人轨迹不入库",
         },
         "dives": rows,
     }
