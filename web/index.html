@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>DiveLog · 潜水记录</title>
+<title>CrestHelper · 界面预览</title>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
@@ -11,9 +11,8 @@
 <!-- 手机外框：三星 S23 比例 1080x2340 (19.5:9) -->
 <div class="phone-frame">
   <div class="phone">
-    <!-- 状态栏 -->
     <div class="statusbar">
-      <span class="sb-time" id="sbTime">9:41</span>
+      <span class="sb-time">14:20</span>
       <span class="sb-right">
         <svg width="15" height="11" viewBox="0 0 15 11"><rect x="0" y="7" width="2" height="4" rx=".5"/><rect x="3.5" y="5" width="2" height="6" rx=".5"/><rect x="7" y="2.5" width="2" height="8.5" rx=".5"/><rect x="10.5" y="0" width="2" height="11" rx=".5"/></svg>
         <svg width="16" height="11" viewBox="0 0 16 11"><path d="M8 1.6c2.4 0 4.6.9 6.3 2.3v1.1C12.6 3.8 10.4 3 8 3S3.4 3.8 1.7 5V3.9C3.4 2.5 5.6 1.6 8 1.6zm0 3.1c1.5 0 2.9.4 4.1 1.1v1.1A7.9 7.9 0 008 7.6a7.9 7.9 0 00-4.1-1.1V5.8A8.1 8.1 0 018 4.7zm0 3.1c1 0 1.9.2 2.7.5v1.3A6 6 0 008 10a6 6 0 00-2.7-.6V8.3c.8-.3 1.7-.5 2.7-.5zm0 3.1c.5 0 1 .1 1.4.2v.8c-.4.2-.9.2-1.4.2s-1 0-1.4-.2v-.8c.4-.1.9-.2 1.4-.2z"/></svg>
@@ -21,25 +20,20 @@
       </span>
     </div>
 
-    <!-- 屏幕内容区 -->
     <div class="screen" id="screen">
 
-      <!-- ============ 页面 1：日志 ============ -->
+      <!-- ============ 日志 ============ -->
       <section class="page active" id="page-dives">
         <header class="pg-head">
           <h1>潜水日志</h1>
           <div class="pg-sub" id="divesSub">载入中…</div>
         </header>
-        <div class="filterbar" id="filterBar">
-          <button class="chip on" data-filter="all">全部</button>
-          <button class="chip" data-filter="risk">隐藏风险</button>
-          <button class="chip" data-filter="merged">已合并</button>
-          <button class="chip" data-filter="invalid">无效</button>
-        </div>
+        <div id="summaryBar"></div>
+        <div class="filterbar" id="filterBar"></div>
         <div class="scroll" id="diveList"></div>
       </section>
 
-      <!-- ============ 页面 2：详情 ============ -->
+      <!-- ============ 详情 ============ -->
       <section class="page" id="page-detail">
         <header class="pg-head detail-head">
           <button class="back" id="btnBack">
@@ -53,25 +47,16 @@
         <div class="scroll" id="detailScroll"></div>
       </section>
 
-      <!-- ============ 页面 3：分析 ============ -->
-      <section class="page" id="page-analysis">
-        <header class="pg-head">
-          <h1>风险分析</h1>
-          <div class="pg-sub">切换算法，找出被宽松设置掩盖的减压义务</div>
-        </header>
-        <div class="scroll" id="analysisScroll"></div>
-      </section>
-
-      <!-- ============ 页面 4：统计 ============ -->
+      <!-- ============ 统计 ============ -->
       <section class="page" id="page-stats">
         <header class="pg-head">
-          <h1>统计报表</h1>
+          <h1>统计</h1>
           <div class="pg-sub" id="statsSub">—</div>
         </header>
         <div class="scroll" id="statsScroll"></div>
       </section>
 
-      <!-- ============ 页面 5：设备 ============ -->
+      <!-- ============ 设备 ============ -->
       <section class="page" id="page-device">
         <header class="pg-head">
           <h1>设备</h1>
@@ -80,17 +65,21 @@
         <div class="scroll" id="deviceScroll"></div>
       </section>
 
+      <!-- ============ 设置 ============ -->
+      <section class="page" id="page-settings">
+        <header class="pg-head">
+          <h1>设置</h1>
+          <div class="pg-sub">减压算法 · 合并规则 · 回收站</div>
+        </header>
+        <div class="scroll" id="settingsScroll"></div>
+      </section>
+
     </div>
 
-    <!-- 底部 Tab -->
     <nav class="tabbar" id="tabbar">
       <button class="tab on" data-page="page-dives">
         <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
         <span>日志</span>
-      </button>
-      <button class="tab" data-page="page-analysis">
-        <svg viewBox="0 0 24 24"><path d="M3 20V9m6 11V4m6 16v-7m6 7V7" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
-        <span>分析</span>
       </button>
       <button class="tab" data-page="page-stats">
         <svg viewBox="0 0 24 24"><path d="M4 20h16M7 20V11m5 9V6m5 14v-9" stroke="currentColor" stroke-width="2.4" fill="none" stroke-linecap="round"/></svg>
@@ -100,14 +89,17 @@
         <svg viewBox="0 0 24 24"><path d="M17.5 8.5a5 5 0 010 7M14 12a2 2 0 11-4 0 2 2 0 014 0zm0 0a5 5 0 00-2-4M9.5 15.5a5 5 0 01-2-4m5 4a5 5 0 002-4" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>
         <span>设备</span>
       </button>
+      <button class="tab" data-page="page-settings">
+        <svg viewBox="0 0 24 24"><path d="M12 15.5a3.5 3.5 0 100-7 3.5 3.5 0 000 7z" stroke="currentColor" stroke-width="2" fill="none"/><path d="M19.4 13a7.6 7.6 0 000-2l1.7-1.3-2-3.4-2 .8a7.6 7.6 0 00-1.7-1L15 3H9l-.4 2.1a7.6 7.6 0 00-1.7 1l-2-.8-2 3.4L4.6 11a7.6 7.6 0 000 2l-1.7 1.3 2 3.4 2-.8a7.6 7.6 0 001.7 1L9 21h6l.4-2.1a7.6 7.6 0 001.7-1l2 .8 2-3.4L19.4 13z" stroke="currentColor" stroke-width="1.8" fill="none" stroke-linejoin="round"/></svg>
+        <span>设置</span>
+      </button>
     </nav>
   </div>
 </div>
 
-<div class="hint">三星 S23 比例 19.5:9 · 数据来自 Crest CR-4 实机下载</div>
+<div class="hint">三星 S23 比例 19.5:9 · 数据来自 Crest CR-4 实机下载（逐点剖面仅少量示例）</div>
 
 <script src="app-data.js"></script>
-<script src="deco.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

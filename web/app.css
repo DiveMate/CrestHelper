@@ -148,7 +148,7 @@ body{
 .filterbar::-webkit-scrollbar{display:none}
 .chip{
   flex:0 0 auto;border:none;background:var(--card);color:var(--ink2);
-  font-size:12px;font-weight:600;padding:6.5px 13px;border-radius:16px;
+  font-size:11.5px;font-weight:600;padding:6px 11px;border-radius:16px;
   box-shadow:var(--shadow);cursor:pointer;font-family:inherit;
 }
 .chip.on{background:var(--brand);color:#fff}
@@ -162,7 +162,7 @@ body{
 .legend i{display:inline-block;width:9px;height:3px;border-radius:2px;margin-right:4px;vertical-align:middle}
 
 /* ---- 进度条 ---- */
-.bar{height:7px;background:#eef2f6;border-radius:4px;overflow:hidden}
+.bar{display:block;height:7px;background:#eef2f6;border-radius:4px;overflow:hidden}
 .bar > i{display:block;height:100%;border-radius:4px;background:var(--brand2)}
 .bar > i.danger{background:var(--danger)}
 .bar > i.warn{background:var(--warn)}
