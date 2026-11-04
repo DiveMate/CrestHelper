@@ -183,7 +183,8 @@ build)
         so="$PROJ/app/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/arm64-v8a/libdcbridge.so"
         readelf=$(ls "$ANDROID_HOME"/ndk/*/toolchains/llvm/prebuilt/*/bin/llvm-readelf.exe 2>/dev/null | head -1)
         if [ -f "$so" ] && [ -n "$readelf" ]; then
-            align=$("$readelf" -l "$so" 2>/dev/null | awk '/LOAD/{print $NF; exit}')
+            # Windows 版 llvm-readelf 输出带 CRLF，$NF 会粘上 \r，必须先去掉
+            align=$("$readelf" -l "$so" 2>/dev/null | awk '/LOAD/{print $NF; exit}' | tr -d '\r')
             if [ "$align" = "0x4000" ]; then
                 ok "libdcbridge.so 16KB 对齐 ($align)"
             else
