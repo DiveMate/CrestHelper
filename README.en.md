@@ -71,7 +71,7 @@ The compatibility table below has the finer boundaries.
 | Parsing | libdivecomputer's `deepsix_excursion` parser built via NDK, exposed as JSON over JNI |
 | Dive list | Year filter, favourites, header stats, multi-select merge & batch delete (scoped to the current filter) |
 | Recycle bin | Delete only sets `user_deleted`; records and samples stay. Restore one/many/all — **no permanent delete** |
-| Dive detail | Profile + temperature, max/avg depth, temperature extremes, **min safe depth**, **NDL remaining**, **GF99** curves, gas annotation, in-place GF editing; above the charts sits a **dive info** card (site, visibility, wetsuit/drysuit, terrain & water tags) |
+| Dive detail | Two metric rows up top (number / start / end / duration, max & avg depth with min & max water temp); gas and deco algorithm share one card, each with its own annotate/configure action; then min safe depth, NDL remaining, GF99 and ascent rate; profile + temperature chart, with the **dive info** card above it (site, visibility, wetsuit/drysuit, terrain & water tags) |
 | Settings | Merge threshold, junk thresholds, direct GF pair (default 30/85), default gas, default sync mode, recycle-bin entry |
 | Statistics | Yearly/monthly counts, depth & duration histograms, surface-interval distribution |
 | File import | Multi-select `.bin` via SAF, fingerprint dedupe, merged with existing data |
