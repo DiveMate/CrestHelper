@@ -1,17 +1,24 @@
 package com.divelog.app
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -38,10 +45,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.divelog.app.data.DiveAnnotation
 import com.divelog.app.data.DiveTag
 import com.divelog.app.data.GasSource
@@ -122,77 +131,52 @@ fun DiveDetailScreen(
             Modifier.padding(pad).fillMaxSize().verticalScroll(rememberScrollState()).padding(12.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            // 深度与时长
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            // 编号与时间：四格等宽，时间降到 13sp（360dp 屏每格只有 78dp）
+            Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                MetricCard("编号", "${entry.primary.no}", Modifier.weight(1f))
+                MetricCard("开始时间", entry.timeText, Modifier.weight(1f), compact = true)
+                MetricCard(
+                    "结束时间",
+                    Fmt.clock(entry.startMillis + entry.durationS * 1000L),
+                    Modifier.weight(1f),
+                    compact = true,
+                )
                 MetricCard("时长", entry.durationText, Modifier.weight(1f))
-                MetricCard("最大深度", entry.depthText, Modifier.weight(1f))
-                MetricCard("平均深度", entry.avgDepthText, Modifier.weight(1f))
             }
-            // 温度、气体与采样
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                MetricCard("最低水温", if (minTemp != null) "${Fmt.one(minTemp)} °C" else "—", Modifier.weight(1f))
-                MetricCard("最高水温", if (maxTemp != null) "${Fmt.one(maxTemp)} °C" else "—", Modifier.weight(1f))
-                MetricCard("采样点", "${entry.primary.nsamples}", Modifier.weight(1f))
-            }
-
-            // 气体：默认空气，只给一个「标注」入口。
-            // 不写「这条记录没有气体信息」之类的解释 —— CR-4 老格式本来就不带 FO₂，
-            // 每条都提示一遍等于噪音，用户要标的时候自然会点。
-            Card(
-                colors = CardDefaults.cardColors(
-                    containerColor = if (entry.isNitrox) MaterialTheme.colorScheme.primaryContainer
-                    else MaterialTheme.colorScheme.surfaceVariant,
-                ),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Row(
-                    Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            "呼吸气体",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Text(
-                            entry.gasLabel,
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                    }
-                    TextButton(onClick = { showGas = true }) { Text("标注") }
-                }
+            // 这一潜的数字：深度与水温
+            Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                MetricCard("最大深度", Fmt.one(entry.maxDepthM), Modifier.weight(1f), unit = "m")
+                MetricCard("平均深度", Fmt.one(entry.avgDepthM), Modifier.weight(1f), unit = "m")
+                MetricCard(
+                    "最低水温",
+                    if (minTemp != null) Fmt.one(minTemp) else "—",
+                    Modifier.weight(1f),
+                    unit = if (minTemp != null) "°C" else null,
+                )
+                MetricCard(
+                    "最高水温",
+                    if (maxTemp != null) Fmt.one(maxTemp) else "—",
+                    Modifier.weight(1f),
+                    unit = if (maxTemp != null) "°C" else null,
+                )
             }
 
-            // 减压算法：只报当前参数，要别的值就点「修改」自己填。
-            // 原来那排常用档位（50/70、80/80…）已经去掉——它只是快捷方式，
-            // 摆在详情页上反而像"只能在预设里挑"。
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text(
-                            "减压算法",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        Text(
-                            "ZHL-16C · 参数 ${DecoSettings.fmt(deco.gfLow)}/${DecoSettings.fmt(deco.gfHigh)}",
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.SemiBold,
-                        )
-                        Text(
-                            if (deco == DecoSettings.DEFAULT) "默认设置" else "已自定义",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    TextButton(onClick = { showGf = true }) { Text("修改") }
-                }
+            // 合并记录：拆开入口只在这类记录上出现，普通记录不占位置
+            if (entry.isMerged) {
+                MergeHintBar(entry.mergedCount, canUnmerge, onUnmerge)
             }
+
+            // 气体与算法同栏：各报一个值，各自带自己的按钮。
+            // 气体不再写「这条记录没有气体信息」之类的解释 —— CR-4 老格式本来就不带 FO₂，
+            // 每条都提示一遍等于噪音，要标的时候自然会点「标注」。
+            GasDecoCard(
+                gasText = entry.gasLabel.substringBefore(" · "),
+                nitrox = entry.isNitrox,
+                gfLow = deco.gfLow,
+                gfHigh = deco.gfHigh,
+                onGas = { showGas = true },
+                onDeco = { showGf = true },
+            )
 
             // 减压结论
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -266,27 +250,9 @@ fun DiveDetailScreen(
                 }
             }
 
-            // 其他信息
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
-                Column(Modifier.fillMaxWidth().padding(12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    InfoLine("开始时间", entry.primary.datetime)
-                    InfoLine("水下时长", entry.durationText + if (entry.isMerged) "（含水面间隔）" else "")
-                    InfoLine("采样点", "${entry.primary.nsamples}" + if (entry.isMerged) "（合并后已载入 ${profile.size}）" else "")
-                    InfoLine("原始大小", "${entry.records.sumOf { it.bytes }} 字节")
-                    if (entry.isMerged) {
-                        InfoLine("合并记录", entry.records.joinToString(", ") { "#${it.no}" })
-                        if (canUnmerge) {
-                            TextButton(onClick = onUnmerge) { Text("拆开这次合并") }
-                        } else {
-                            Text(
-                                "由「自动合并」产生，可在列表的「合并设置」里调小间隔或关闭",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
-                }
-            }
+            // 「其他信息」卡已拆掉：开始时间进第一栏，结束时间由开始 + 时长算出，
+            // 水下时长跟第一栏的「时长」重复，采样点与原始大小属于排查用的内部量，
+            // 合并组的关系改由上方那条提示条表达。
             Spacer(Modifier.height(8.dp))
         }
     }
@@ -680,17 +646,175 @@ private fun MetricCard(
     modifier: Modifier = Modifier,
     /** 带单位的长值（如 "11.2 m/min"）在三分之一宽的卡里会折行，用小一号字。 */
     dense: Boolean = false,
+    /** 秒级时间（"18:23:43"）在四等分卡片里用 16sp 放不下，降到 13sp。 */
+    compact: Boolean = false,
+    /** 单位单独用小一号字，免得 "22.11 m" 把四等分卡片撑爆。 */
+    unit: String? = null,
 ) {
     Card(modifier) {
-        Column(Modifier.padding(horizontal = 10.dp, vertical = 8.dp)) {
-            Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Column(Modifier.padding(horizontal = 8.dp, vertical = 8.dp)) {
             Text(
-                value,
-                style = if (dense) MaterialTheme.typography.titleSmall else MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
+                label,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
             )
+            Row(verticalAlignment = Alignment.Bottom) {
+                Text(
+                    value,
+                    style = when {
+                        compact -> MaterialTheme.typography.titleSmall.copy(fontSize = 13.sp)
+                        dense -> MaterialTheme.typography.titleSmall
+                        else -> MaterialTheme.typography.titleMedium
+                    },
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                )
+                if (unit != null) {
+                    Text(
+                        unit,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 1.dp, bottom = 1.dp),
+                        maxLines = 1,
+                    )
+                }
+            }
         }
+    }
+}
+
+/**
+ * 气体 + 减压算法同栏：左边气体、右边算法，各自带自己的入口。
+ *
+ * 两列不等宽：气体那半只放「空气 / EAN32」和一个小按钮，106dp 足够；
+ * 让出来的宽度给算法那半（ZHL-16C + 30/85 + 配置），360dp 屏上才不挤。
+ */
+@Composable
+private fun GasDecoCard(
+    gasText: String,
+    nitrox: Boolean,
+    gfLow: Double,
+    gfHigh: Double,
+    onGas: () -> Unit,
+    onDeco: () -> Unit,
+) {
+    Card {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .height(IntrinsicSize.Min)
+                .padding(start = 10.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
+        ) {
+            Column(Modifier.width(106.dp)) {
+                Text(
+                    "气体",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                )
+                Row(Modifier.padding(top = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        gasText,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        // 高氧只染这个值，卡底保持白色，免得把右边算法也一起染色
+                        color = if (nitrox) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                    )
+                    MiniAction("标注", onGas, Modifier.padding(start = 6.dp))
+                }
+            }
+            Box(
+                Modifier
+                    .fillMaxHeight()
+                    .padding(vertical = 1.dp)
+                    .width(1.dp)
+                    .background(MaterialTheme.colorScheme.outlineVariant),
+            )
+            Column(Modifier.weight(1f).padding(start = 11.dp)) {
+                Text(
+                    "减压算法",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                )
+                Row(Modifier.padding(top = 3.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "ZHL-16C",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                    )
+                    Text(
+                        "${DecoSettings.fmt(gfLow)}/${DecoSettings.fmt(gfHigh)}",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.SemiBold,
+                        modifier = Modifier.padding(start = 10.dp),
+                        maxLines = 1,
+                    )
+                    MiniAction("配置", onDeco, Modifier.padding(start = 6.dp))
+                }
+            }
+        }
+    }
+}
+
+/** 合并记录的提示条：普通记录不显示，不占位置。 */
+@Composable
+private fun MergeHintBar(count: Int, canUnmerge: Boolean, onUnmerge: () -> Unit) {
+    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+        Row(
+            Modifier.fillMaxWidth().padding(start = 12.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                "由 $count 条记录合并 · 时长含水面间隔",
+                Modifier.weight(1f),
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+            )
+            if (canUnmerge) {
+                MiniAction("拆开", onUnmerge, arrow = false)
+            } else {
+                Text(
+                    "自动合并",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 卡片内的小号文字按钮。
+ *
+ * 不用 TextButton：它自带 48dp 最小高度，会把整张卡顶高约 10dp。
+ * 这里视觉高度约 22dp，靠外围 padding 让点击区域不至于太小。
+ */
+@Composable
+private fun MiniAction(
+    text: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    arrow: Boolean = true,
+) {
+    Box(
+        modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(MaterialTheme.colorScheme.primaryContainer)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 6.dp, vertical = 4.dp),
+    ) {
+        Text(
+            if (arrow) "$text ›" else text,
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onPrimaryContainer,
+            maxLines = 1,
+        )
     }
 }
 

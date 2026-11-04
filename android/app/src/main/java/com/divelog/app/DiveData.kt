@@ -21,6 +21,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.io.BufferedReader
 import java.io.File
+import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -805,6 +806,19 @@ object Fmt {
         val s = sec % 60
         return "$m:${s.toString().padStart(2, '0')}"
     }
+
+    private val CLOCK_FMT: DateTimeFormatter = DateTimeFormatter.ofPattern("HH:mm:ss")
+
+    /**
+     * 毫秒时间戳 -> "19:07:31"（本机时区）。
+     *
+     * 详情页用它算「结束时间」：开始 timeText 只到秒，加上 durationS 再格式化，
+     * 跨零点也不会出现 "43:48" 这种越界值。
+     */
+    fun clock(millis: Long): String = runCatching {
+        LocalDateTime.ofInstant(Instant.ofEpochMilli(millis), ZoneId.systemDefault())
+            .format(CLOCK_FMT)
+    }.getOrDefault("—")
 
     /** 坐标轴时间标签：秒 -> "12'" */
     fun axisMinutes(sec: Int): String = "${sec / 60}'"
