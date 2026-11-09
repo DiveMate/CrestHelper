@@ -11,8 +11,8 @@ android/local.properties
 captures/
 
 # ---- 工作区私记 ----
-# 仓库根现在就是工作区根（D:\code\CrestHelper），.workbuddy/memory 里是
-# 开发过程的私人记录（含本机路径、设备 MAC、调试过程），不进公开仓库。
+# .workbuddy/memory 里是开发过程的私人记录（含本机路径、设备 MAC、调试过程），
+# 不进公开仓库。
 .workbuddy/
 
 # ---- 原生构建产物 ----

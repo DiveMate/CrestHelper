@@ -20,7 +20,9 @@
 
 **合并记录**
 
-- 被合并的几次潜水会显示一条提示，可以直接在这条记录上「拆开」
+- 被**手动合并**的几次潜水会显示一条提示，可以直接在这条记录上「拆开」；自动合并的组不提供拆除入口
+
+> 订正（2026-11）：这里原写「被合并的几次潜水…可以直接拆开」，不准确 —— 只有手动合并的组可拆。
 
 ## 安装
 
@@ -42,6 +44,17 @@
 - 只做水肺模式，自由潜懒得搞了
 - 无账号、无云同步，数据全在本机 SQLite
 - 老记录不带气体信息，气体种类依赖手动标注
+
+## 已知问题（0.1.3 已修复，建议升级）
+
+- **GF99 用错了口径**：曲线与峰值按「当前深度」而不是「直冲水面」计算，深水段恒显示 0/负值。
+  实测有 2 条真实潜水（#183、#185）已经越过 M 值线，却被显示成 85% 左右。
+- 减压内核的 Schreiner 段积分把段末环境压当成肺泡压基准，升降段组织负荷有偏差
+  （对真实剖面影响很小：减压时长差 ≤30 秒、天花板差 <0.01 m，但公式本身是错的）。
+- 未关闭系统备份：潜水库与手表 MAC 可能被 adb / 云备份 / 换机直传导出。
+- 同步取消不生效、手表断线后连接资源不释放、前台服务启动失败会崩。
+
+详见 [v0.1.3 发布说明](release-notes-v0.1.3.md)。
 
 ## 致谢
 
@@ -74,7 +87,9 @@ A third-party Android client for the **Crest CR-4** dive computer. This release 
 
 **Merged dives**
 
-- Dives that were stitched together show a hint, and can be split apart right there
+- Dives merged **manually** show a hint and can be split apart right there; auto-merged groups have no split action
+
+> Correction (Nov 2026): the original wording implied any merged dive could be split. Only manual groups can.
 
 ### Install
 
@@ -96,6 +111,19 @@ A third-party Android client for the **Crest CR-4** dive computer. This release 
 - SCUBA mode only; freediving isn't worth the bother
 - No accounts, no cloud sync — everything stays in a local SQLite database
 - Older records carry no gas information, so gas type depends on manual annotation
+
+### Known issues (fixed in 0.1.3 — please upgrade)
+
+- **GF99 used the wrong reference**: curves and peaks were computed against *current depth* instead of
+  *surfacing now*, so the deep section always read 0 / negative. Two real dives (#183, #185) had crossed
+  the M-value line yet were shown around 85%.
+- The Schreiner segment integration used the segment's end pressure as the alveolar baseline, skewing
+  on-gassing/off-gassing during descents and ascents (small in practice: ≤30 s deco time, <0.01 m ceiling,
+  but the formula was simply wrong).
+- Android backup was not disabled: the dive database and watch MAC could be exported via adb / cloud backup / device transfer.
+- Cancelling a sync didn't stop it, GATT resources leaked after a disconnect, and a failed foreground-service start crashed the app.
+
+See the [v0.1.3 release notes](release-notes-v0.1.3.md).
 
 ### Credits
 

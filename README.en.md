@@ -73,7 +73,7 @@ The compatibility table below has the finer boundaries.
 | Recycle bin | Delete only sets `user_deleted`; records and samples stay. Restore one/many/all — **no permanent delete** |
 | Dive detail | Two metric rows up top (number / start / end / duration, max & avg depth with min & max water temp); gas and deco algorithm share one card, each with its own annotate/configure action; then min safe depth, NDL remaining, GF99 and ascent rate; profile + temperature chart, with the **dive info** card above it (site, visibility, wetsuit/drysuit, terrain & water tags) |
 | Settings | Merge threshold, junk thresholds, direct GF pair (default 30/85), default gas, default sync mode, recycle-bin entry |
-| Statistics | Yearly/monthly counts, depth & duration histograms, surface-interval distribution |
+| Statistics | Yearly/monthly counts, depth & duration histograms, 12-month trend |
 | File import | Multi-select `.bin` via SAF, fingerprint dedupe, merged with existing data |
 | Watch sync | Incremental sync by index delta with anchor fingerprint check, auto-fallback to full sync |
 | Background sync | Runs in a process-level engine + foreground service; leaving the screen, switching apps or locking the phone won't interrupt it |
@@ -145,8 +145,9 @@ bash at.sh device   # on-device instrumented tests only
 ## Data
 
 `data/dives.csv` holds **summaries**: one row of numbers per dive (index, start time, duration,
-max depth, lowest temperature). It is imported into SQLite on first launch and backs the list,
-the filters and the statistics.
+max depth, lowest temperature). Only **debug builds** import it into SQLite on first launch
+(release builds ship no sample data and start empty — you fill it via BLE sync or `.bin` import);
+the list, the filters and the statistics all read that table.
 
 It contains **40 curated samples** drawn from a real CR-4 logbook — every year from 2020 to 2026,
 keeping the deepest 34.7 m, the longest 101 min, and a few one-to-two-second accidental triggers
@@ -195,10 +196,12 @@ Command groups: `0xA0` device info, `0xB0` settings (date/time/storage/load), `0
 
 ## Disclaimer
 
-This is a **log review tool**, not a dive planning tool. NDL, decompression times and min safe
-depth recomputed here come from replaying a recorded profile with assumed parameters. They
-**cannot replace your dive computer's real-time computation and must not be used for planning a
-dive**. Plan with trained procedures and your own computer.
+This is a **log review tool**, not a dive planning tool. NDL, decompression times, min safe depth and
+GF99 recomputed here come from replaying a recorded profile with assumed parameters (ZHL-16C plus
+adjustable GF, single gas). They **cannot replace your dive computer's real-time computation, must not
+be used for planning a dive, and must not be used to judge whether any particular dive was safe**.
+Their purpose is comparing "what would change with a different GF under the same profile", not issuing
+a safety verdict on a dive. Plan with trained procedures and your own computer.
 
 ## Docs
 
