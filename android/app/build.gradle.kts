@@ -26,8 +26,8 @@ android {
         applicationId = "com.divelog.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.1.2"
+        versionCode = 4
+        versionName = "0.1.3"
         ndk {
             abiFilters += listOf("arm64-v8a")   // 只编真机架构，加快构建
         }
@@ -91,12 +91,12 @@ android {
 }
 
 // ---- 示例数据只进 debug 包 ---------------------------------------------------
-// 仓库根 data/ 里放着 253 条真实潜水记录（含 3 MB 逐点剖面）。那是个人潜水轨迹，
+// 仓库根 data/dives.csv 是 40 条精选摘要（约 5 KB）。那是真实潜水记录，
 // **发布包不能带**：release 变体压根不挂载这份数据，装出来是空库，
 // 靠蓝牙同步或导入 .bin 自己积累。
+// 逐点剖面 samples.csv 不入库（个人轨迹），本机有就一起拷、没有就只有摘要（无曲线）。
 //
 // 做法是"构建时从 data/ 拷一份"而不是"在模块里存一份副本"，避免两份 CSV 各自漂移。
-// samples.csv 不入库，clone 下来没有它 → 这里拷不到就只带 dives.csv（没曲线）。
 abstract class StageDemoAssets : DefaultTask() {
     @get:InputFiles
     abstract val sources: ConfigurableFileCollection
