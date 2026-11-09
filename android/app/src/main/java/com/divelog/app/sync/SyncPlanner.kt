@@ -79,16 +79,31 @@ object SyncPlanner {
             )
         }
         if (delta == 0) {
-            if (watch.ndives < local.count) {
+            if (watch.ndives != local.count) {
                 return full(
                     watch,
-                    "编号没变但手表只剩 ${watch.ndives} 条（本地 ${local.count}），日志被覆盖过，改走全量",
+                    "编号没变但手表有 ${watch.ndives} 条（本地 ${local.count}），日志被覆盖/清空过，改走全量",
+                    fallback = true,
+                )
+            }
+            // 编号相同也必须验锚点：手表最后一条被改写（或本地漏下中间记录）时，
+            // 只看 delta==0 会永久判「已是最新」，永远不会自愈。
+            if (local.fingerprint.isNullOrBlank()) {
+                return full(watch, "本地缺锚点指纹（#${local.maxIndex}），无法校验编号，改走全量", fallback = true)
+            }
+            if (anchorFingerprint == null) {
+                return full(watch, "读不到手表上 #${local.maxIndex} 的 header，改走全量", fallback = true)
+            }
+            if (!anchorFingerprint.equals(local.fingerprint, ignoreCase = true)) {
+                return full(
+                    watch,
+                    "编号没变但锚点指纹不一致（本地 ${local.fingerprint} / 手表 $anchorFingerprint），日志被改写，改走全量",
                     fallback = true,
                 )
             }
             return SyncPlan(
                 PlanKind.UP_TO_DATE, mode, local.maxIndex, watch.lastIndex, 0,
-                "已是最新（手表 ${watch.lastIndex} / 本地 ${local.maxIndex}）",
+                "已是最新（手表 ${watch.lastIndex} / 本地 ${local.maxIndex}，锚点一致）",
             )
         }
 

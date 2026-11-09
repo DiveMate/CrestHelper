@@ -4,6 +4,9 @@ import com.divelog.app.DiveRepository
 import com.divelog.app.WatchIngest
 import com.divelog.app.data.WatchProgress
 import com.divelog.app.data.WatchRecord
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import java.time.LocalDateTime
 
 /**
@@ -69,13 +72,21 @@ class WatchSync(
      * 手表上指定编号的指纹。增量同步的锚点校验要它。
      * 读不到（编号不存在/设备不回）返回 null，由 [SyncPlanner] 降级成全量。
      */
-    suspend fun anchorFingerprint(index: Int, fw6: Boolean): String? = runCatching {
-        val raw = link.transfer(
-            WatchProtocol.GRP_DIVE, WatchProtocol.CMD_DIVE_HEADER, WatchProtocol.DIR_READ,
-            WatchProtocol.leU16(index),
-        )
-        WatchProtocol.parseHeader(raw, index, fw6).fingerprint
-    }.getOrNull()
+    suspend fun anchorFingerprint(index: Int, fw6: Boolean): String? {
+        // 不能用 runCatching：它会把 CancellationException 一起吃下去，
+        // 取消同步时这里会假装"读不到锚点"，然后继续跑完整轮。
+        return try {
+            val raw = link.transfer(
+                WatchProtocol.GRP_DIVE, WatchProtocol.CMD_DIVE_HEADER, WatchProtocol.DIR_READ,
+                WatchProtocol.leU16(index),
+            )
+            WatchProtocol.parseHeader(raw, index, fw6).fingerprint
+        } catch (c: CancellationException) {
+            throw c
+        } catch (e: Exception) {
+            null
+        }
+    }
 
     /** 组合：读设备信息 → 读本地进度 → 需要时读锚点 → 出计划。 */
     suspend fun makePlan(mode: SyncMode): PlanBundle {
@@ -118,6 +129,8 @@ class WatchSync(
         val errors = ArrayList<String>(4)
 
         for ((n, idx) in indices.withIndex()) {
+            // 取消检查放在循环顶部：用户点「取消」后不该再把剩下几百条跑完
+            currentCoroutineContext().ensureActive()
             if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
                 errors.add("连续 $consecutiveFailures 条失败，中止本轮")
                 break
@@ -155,6 +168,10 @@ class WatchSync(
                     }
                 }
                 consecutiveFailures = 0
+            } catch (c: CancellationException) {
+                // 取消不是"这一条失败"：必须向上抛，否则会继续下一条、
+                // 凑满 3 次失败后照常写库并记一条「同步完成」。
+                throw c
             } catch (e: Exception) {
                 failed++
                 consecutiveFailures++
@@ -163,6 +180,8 @@ class WatchSync(
             onProgress(SyncProgress(n + 1, indices.size, idx, "完成"))
         }
 
+        // 写库前再确认一次：取消时不该留下"同步完成"的假记录
+        currentCoroutineContext().ensureActive()
         val elapsed = clock() - started
         repo.upsertWatch(
             WatchRecord(
@@ -266,6 +285,9 @@ class WatchSync(
      */
     suspend fun setClock(now: LocalDateTime = LocalDateTime.now()): ClockResult {
         if (now.year !in 2000..2255) return ClockResult.Failed("年份超出设备范围（2000-2255）")
+        // 已经写进易失寄存器、还没 STORE 的状态。中途失败必须 LOAD 丢弃，
+        // 否则设备停在一个"日期改了、时间没改"的半写入态，用户下次看表会以为时间是对的。
+        var pending = false
         return try {
             link.transfer(WatchProtocol.GRP_SETTINGS, WatchProtocol.CMD_SETTINGS_LOAD, WatchProtocol.DIR_WRITE)
 
@@ -278,14 +300,17 @@ class WatchSync(
                 WatchProtocol.GRP_SETTINGS, WatchProtocol.CMD_SETTINGS_DATE, WatchProtocol.DIR_WRITE, date,
             )
             if (!dateRsp.contentEquals(date)) {
+                discardPending()
                 return ClockResult.Failed("日期回读不一致：写入 ${date.toHexString()}，回读 ${dateRsp.toHexString()}")
             }
+            pending = true
 
             val time = byteArrayOf(now.hour.toByte(), now.minute.toByte(), now.second.toByte())
             val timeRsp = link.transfer(
                 WatchProtocol.GRP_SETTINGS, WatchProtocol.CMD_SETTINGS_TIME, WatchProtocol.DIR_WRITE, time,
             )
             if (!timeRsp.contentEquals(time)) {
+                discardPending()
                 return ClockResult.Failed("时间回读不一致：写入 ${time.toHexString()}，回读 ${timeRsp.toHexString()}")
             }
 
@@ -293,9 +318,25 @@ class WatchSync(
                 WatchProtocol.GRP_SETTINGS, WatchProtocol.CMD_SETTINGS_STORE, WatchProtocol.DIR_WRITE,
                 byteArrayOf(0),
             )
+            pending = false
             ClockResult.Ok(now)
+        } catch (c: CancellationException) {
+            if (pending) discardPending()
+            throw c
         } catch (e: Exception) {
+            if (pending) discardPending()
             ClockResult.Failed(e.message ?: e::class.java.simpleName)
+        }
+    }
+
+    /** 重新 LOAD，丢弃尚未 STORE 的写入。失败就算了，只是尽力收尾。 */
+    private suspend fun discardPending() {
+        try {
+            link.transfer(WatchProtocol.GRP_SETTINGS, WatchProtocol.CMD_SETTINGS_LOAD, WatchProtocol.DIR_WRITE)
+        } catch (c: CancellationException) {
+            throw c
+        } catch (_: Exception) {
+            // 收尾失败不覆盖原始错误
         }
     }
 

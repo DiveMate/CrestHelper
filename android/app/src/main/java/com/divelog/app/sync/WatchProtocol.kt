@@ -134,14 +134,26 @@ object WatchProtocol {
         ((v shr 24) and 0xFF).toByte(),
     )
 
-    fun leU16At(b: ByteArray, off: Int): Int =
-        (b[off].toInt() and 0xFF) or ((b[off + 1].toInt() and 0xFF) shl 8)
+    /**
+     * 小端读 16 位。响应可能被设备截短（空包 / 1 字节），越界直接抛协议异常，
+     * 不要等 Kotlin 抛 ArrayIndexOutOfBounds —— 那个信息看不出是哪条命令出的问题。
+     */
+    fun leU16At(b: ByteArray, off: Int): Int {
+        if (off < 0 || off + 2 > b.size) {
+            throw WatchProtocolException("响应太短：offset=$off 需要 2 字节，实际 ${b.size}")
+        }
+        return (b[off].toInt() and 0xFF) or ((b[off + 1].toInt() and 0xFF) shl 8)
+    }
 
-    fun leU32At(b: ByteArray, off: Int): Long =
-        (b[off].toLong() and 0xFF) or
+    fun leU32At(b: ByteArray, off: Int): Long {
+        if (off < 0 || off + 4 > b.size) {
+            throw WatchProtocolException("响应太短：offset=$off 需要 4 字节，实际 ${b.size}")
+        }
+        return (b[off].toLong() and 0xFF) or
             ((b[off + 1].toLong() and 0xFF) shl 8) or
             ((b[off + 2].toLong() and 0xFF) shl 16) or
             ((b[off + 3].toLong() and 0xFF) shl 24)
+    }
 
     private fun leU32(b: ByteArray, off: Int): Int = leU32At(b, off).toInt()
 

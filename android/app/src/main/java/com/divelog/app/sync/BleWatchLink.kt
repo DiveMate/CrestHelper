@@ -11,14 +11,12 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.bluetooth.BluetoothStatusCodes
 import android.bluetooth.le.ScanCallback
-import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
-import android.os.ParcelUuid
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
@@ -61,8 +59,21 @@ class BleWatchLink private constructor(
     private val rx = Channel<ByteArray>(Channel.UNLIMITED)
     private val mtu = AtomicInteger(initialMtu)
 
+    /** 逻辑关闭：阻断后续 transfer / notify。 */
     @Volatile
     private var closed = false
+
+    /** 资源是否已释放。GATT 只能 close 一次，用 CAS 保证幂等。 */
+    private val released = AtomicBoolean(false)
+
+    /**
+     * 非主动 close 的断线回调，由 [WatchSession] 挂上。
+     *
+     * 手表自己断电/走远时 GATT 不会有人替我们更新界面，只能在这里通知上层，
+     * 否则界面会一直显示「已连接」，点同步立刻失败。
+     */
+    @Volatile
+    var onUnexpectedClose: ((String) -> Unit)? = null
 
     private var writeSignal: CompletableDeferred<Unit>? = null
 
@@ -83,6 +94,18 @@ class BleWatchLink private constructor(
         closed = true
         rx.close()
         writeSignal?.completeExceptionally(IOException("蓝牙已断开"))
+        // 断线后 gatt 对象不会自己回收，必须 close，否则下次连接会累积 client interface
+        releaseResources()
+        onUnexpectedClose?.invoke("手表断开了连接")
+    }
+
+    /** 释放 GATT 资源。幂等：close 只会执行一次。 */
+    private fun releaseResources() {
+        if (!released.compareAndSet(false, true)) return
+        closed = true
+        rx.close()
+        runCatching { gatt.disconnect() }
+        runCatching { gatt.close() }
     }
 
     override suspend fun transfer(
@@ -119,11 +142,9 @@ class BleWatchLink private constructor(
     }
 
     override suspend fun close() {
-        if (closed) return
-        closed = true
-        rx.close()
-        runCatching { gatt.disconnect() }
-        runCatching { gatt.close() }
+        // 主动断开：摘掉回调，避免上层把"用户点了断开"再显示成"手表断线"
+        onUnexpectedClose = null
+        releaseResources()
     }
 
     private suspend fun writePacket(packet: ByteArray) {
@@ -196,8 +217,19 @@ class BleWatchLink private constructor(
                     if (settled.compareAndSet(false, true)) cont.resume(link)
                 }
 
-                fun fail(e: Throwable) {
-                    if (settled.compareAndSet(false, true)) cont.resumeWithException(e)
+                /**
+                 * 失败出口。**必须顺手 close gatt**：这条路径结束的不是协程（不会触发
+                 * invokeOnCancellation），pendingLink 也没交给任何人，不关就泄漏一个
+                 * GATT client interface —— 累积到 32 个左右，这台手机就再也连不上任何 BLE 了。
+                 */
+                fun fail(e: Throwable, g: BluetoothGatt? = null) {
+                    if (settled.compareAndSet(false, true)) {
+                        if (g != null) {
+                            runCatching { g.disconnect() }
+                            runCatching { g.close() }
+                        }
+                        cont.resumeWithException(e)
+                    }
                 }
 
                 val callback = object : BluetoothGattCallback() {
@@ -211,7 +243,7 @@ class BleWatchLink private constructor(
 
                             newState == BluetoothProfile.STATE_DISCONNECTED -> {
                                 pendingLink?.onDisconnected()
-                                fail(IOException("连接断开（status=$status）"))
+                                fail(IOException("连接断开（status=$status）"), g)
                             }
                         }
                     }
@@ -225,19 +257,19 @@ class BleWatchLink private constructor(
 
                     override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
                         if (status != BluetoothGatt.GATT_SUCCESS) {
-                            fail(IOException("服务发现失败（status=$status）"))
+                            fail(IOException("服务发现失败（status=$status）"), g)
                             return
                         }
                         val service: BluetoothGattService? =
                             g.getService(SERVICE_UUID) ?: pickSerialLikeService(g)
                         if (service == null) {
-                            fail(IOException("没找到数据服务（期望 $SERVICE_UUID）"))
+                            fail(IOException("没找到数据服务（期望 $SERVICE_UUID）"), g)
                             return
                         }
                         val ch = service.getCharacteristic(CHAR_UUID)
                             ?: service.characteristics.firstOrNull { it.isWritable() }
                         if (ch == null) {
-                            fail(IOException("没找到可写特征（service=${service.uuid}）"))
+                            fail(IOException("没找到可写特征（service=${service.uuid}）"), g)
                             return
                         }
                         val notifyChar = service.characteristics.firstOrNull { it.isNotifiable() } ?: ch
@@ -279,7 +311,14 @@ class BleWatchLink private constructor(
                     }
 
                     override fun onDescriptorWrite(g: BluetoothGatt, d: BluetoothGattDescriptor, status: Int) {
-                        pendingLink?.let { succeed(it) }
+                        val link = pendingLink ?: return
+                        // 不校验 status 就 succeed，等于把「订阅失败」当成功：
+                        // 之后一条 notify 都收不到，每轮都等满超时，整批记录全失败。
+                        if (d.uuid != CCCD_UUID || status != BluetoothGatt.GATT_SUCCESS) {
+                            fail(IOException("订阅通知失败（status=$status）"), g)
+                            return
+                        }
+                        succeed(link)
                     }
 
                     override fun onCharacteristicWrite(
@@ -336,8 +375,11 @@ class BleWatchLink private constructor(
 /**
  * 扫描 CR-4。
  *
- * 用服务 UUID `0000ffc0` 做 ScanFilter（广播里带的就是它），
- * 这样即使广播名被改过也能扫到；名字只作为兜底识别与展示。
+ * 广播里带服务 UUID `0000ffc0`，所以优先按它认；名字（[BleWatchLink.BROADCAST_NAMES]）
+ * 作为兜底，贴牌/改过名的设备也能扫到。
+ *
+ * 注意：**不要**给 `startScan` 传 ScanFilter —— 传了之后系统只回调命中的广播，
+ * 回调里的名字兜底就失效了。过滤在回调里自己做。
  */
 class Cr4Scanner(private val ctx: Context) {
 
@@ -371,12 +413,10 @@ class Cr4Scanner(private val ctx: Context) {
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
-        val filters = listOf(
-            ScanFilter.Builder()
-                .setServiceUuid(ParcelUuid(UUID.fromString("0000ffc0-0000-1000-8000-00805f9b34fb")))
-                .build()
-        )
-        scanner.startScan(filters, settings, callback)
+        // 不用 ScanFilter 直接过滤：一旦传了 filter，系统只把命中的结果回调上来，
+        // 回调里的名字兜底（looksLikeCr4）就永远走不到，贴牌/改名设备扫不到。
+        // 过滤放在回调里做（同时认服务 UUID 和名字），8 秒窗口开销可以接受。
+        scanner.startScan(null, settings, callback)
         try {
             delay(timeoutMs)
         } finally {
@@ -411,9 +451,17 @@ class WatchSession {
     suspend fun connect(ctx: Context, device: BluetoothDevice): Result<BleWatchLink> {
         _state.value = LinkState.Connecting
         return runCatching { BleWatchLink.connect(ctx, device) }
-            .onSuccess {
-                link = it
-                _state.value = LinkState.Ready(it.name)
+            .onSuccess { l ->
+                link = l
+                // 手表主动断开时（走远、没电、被别的手机连走），只有这条回调能通知界面，
+                // 否则界面会一直停在「已连接」，点同步立刻 IOException。
+                l.onUnexpectedClose = { reason ->
+                    if (link === l) {
+                        link = null
+                        _state.value = LinkState.Failed(reason)
+                    }
+                }
+                _state.value = LinkState.Ready(l.name)
             }
             .onFailure { _state.value = LinkState.Failed(it.message ?: "连接失败") }
     }

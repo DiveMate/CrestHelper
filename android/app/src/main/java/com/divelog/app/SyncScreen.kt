@@ -238,6 +238,16 @@ fun SyncScreen(
 
     fun runSync(mode: SyncMode) {
         if (syncing) return
+        // 现场查权限，不信 remember 的缓存：用户可能在系统设置里刚撤销蓝牙权限。
+        // 不查就进 sync.start()，SyncService 里 startForeground 会 SecurityException 崩溃。
+        val missing = perms.any {
+            ContextCompat.checkSelfPermission(ctx, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (missing) {
+            message = "需要蓝牙权限才能同步，请先授予"
+            permLauncher.launch(perms.toTypedArray())
+            return
+        }
         showSyncPrompt = false
         message = null
         WatchHub.engine.clearResult()
@@ -463,6 +473,14 @@ fun SyncScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.padding(top = 2.dp),
                             )
+                            eng.warning?.let {
+                                Text(
+                                    it,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.padding(top = 2.dp),
+                                )
+                            }
                             TextButton(
                                 onClick = { WatchHub.engine.cancel() },
                                 modifier = Modifier.fillMaxWidth(),

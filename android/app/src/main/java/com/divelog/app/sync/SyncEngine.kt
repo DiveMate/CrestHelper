@@ -8,12 +8,14 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 
 /**
  * 进程级单例：一块表 + 一个同步执行器。
@@ -53,6 +55,8 @@ class SyncEngine internal constructor(
         val progress: SyncProgress? = null,
         val result: SyncResult? = null,
         val error: String? = null,
+        /** 不致命但需要告诉用户的降级提示（前台服务/唤醒锁没拿到）。 */
+        val warning: String? = null,
         /** 每完成一次（成功/失败/取消）+1，界面拿它当"该刷新了"的信号。 */
         val finishedTick: Int = 0,
         val startedAt: Long = 0L,
@@ -87,14 +91,22 @@ class SyncEngine internal constructor(
         // 唤醒锁 + 前台服务：这两样是"后台不断链"的全部保障，
         // 少了任何一个，锁屏五分钟后系统都可能把进程挂起。
         val wake = acquireWakeLock(app)
-        SyncService.start(app)
+        val fgOk = SyncService.start(app)
 
+        // runSync 会同步地把 state 重置成 running=true，所以提示必须在它之后再写
         runSync(repo, mode, link) {
             runCatching { wake?.release() }
             SyncService.stop(app)
             job = null
         }
+        if (wake == null) warn("唤醒锁获取失败，锁屏后同步可能被系统挂起")
+        if (!fgOk) warn("前台服务未能拉起，同步会在前台继续，切到后台可能中断")
         return null
+    }
+
+    /** 记录/追加一条降级提示（不改变 running 状态）。 */
+    internal fun warn(message: String) {
+        _state.update { it.copy(warning = message) }
     }
 
     /**
@@ -113,11 +125,24 @@ class SyncEngine internal constructor(
             else WatchSync(link, repo, ingestor = ingestor)
             try {
                 val bundle = withContext(Dispatchers.IO) { sync.makePlan(mode) }
-                val res = withContext(Dispatchers.IO) {
-                    sync.run(bundle) { p -> _state.update { it.copy(progress = p) } }
+                // 整轮加个上限：唤醒锁 30 分钟会被系统回收，之后进程随时可能被挂起，
+                // 卡在这里的协程既不会结束也不会推进，界面就一直转圈。
+                val res = withTimeout(SYNC_TIMEOUT_MS) {
+                    withContext(Dispatchers.IO) {
+                        sync.run(bundle) { p -> _state.update { it.copy(progress = p) } }
+                    }
                 }
                 _state.update {
                     it.copy(running = false, result = res, finishedTick = it.finishedTick + 1, finishedAt = clock())
+                }
+            } catch (t: TimeoutCancellationException) {
+                _state.update {
+                    it.copy(
+                        running = false,
+                        error = "同步超过 ${SYNC_TIMEOUT_MS / 60000} 分钟仍未完成，已中止（可重试增量）",
+                        finishedTick = it.finishedTick + 1,
+                        finishedAt = clock(),
+                    )
                 }
             } catch (c: CancellationException) {
                 _state.update {
@@ -148,7 +173,7 @@ class SyncEngine internal constructor(
     /** 结果看过就清掉，避免下次进来还挂着上一条的结论。 */
     fun clearResult() {
         if (_state.value.running) return
-        _state.update { it.copy(result = null, error = null) }
+        _state.update { it.copy(result = null, error = null, warning = null) }
     }
 
     private fun acquireWakeLock(ctx: Context): PowerManager.WakeLock? = runCatching {
@@ -165,5 +190,7 @@ class SyncEngine internal constructor(
         const val WAKE_TAG = "divelog:sync"
         /** 兜底 30 分钟：真卡死了也别一直占着唤醒锁把电耗干。 */
         const val WAKE_TIMEOUT_MS = 30 * 60 * 1000L
+        /** 与唤醒锁同量级：超过这个时间一定不正常，主动收尾而不是无限转圈。 */
+        const val SYNC_TIMEOUT_MS = 30 * 60 * 1000L
     }
 }

@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
@@ -35,16 +36,26 @@ class SyncService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var watcher: Job? = null
 
+    /** 当前是否真的挂在前台上。startForeground 失败时保持 false，不能假装成功。 */
+    private var foregroundOk = false
+
     override fun onCreate() {
         super.onCreate()
         createChannel()
         // 必须在 5 秒内 startForeground，先拿当前状态画一版
-        startForeground(NOTIF_ID, build(WatchHub.engine.state.value))
+        foregroundOk = enterForeground()
+        if (!foregroundOk) {
+            // 拿不到前台资格（权限被撤销 / connectedDevice 校验没过 / 通知被禁用）：
+            // 服务退出，但同步本身照跑 —— 界面会显示降级提示，别在这里崩掉整个 App。
+            stopSelf()
+            return
+        }
         watcher = scope.launch {
             WatchHub.engine.state.collect { st ->
                 if (!st.running) {
+                    // 先摘前台通知（连带进度条和「取消」按钮），再补一条可点掉的最终结果
+                    runCatching { stopForeground(STOP_FOREGROUND_REMOVE) }
                     runCatching { notify(build(st)) }
-                    stopForeground(STOP_FOREGROUND_DETACH)
                     stopSelf()
                     return@collect
                 }
@@ -56,7 +67,12 @@ class SyncService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_CANCEL) {
             WatchHub.engine.cancel()
+            return START_NOT_STICKY
         }
+        // 上一次同步刚结束、stopSelf 还没真正销毁时又点同步，会复用这个实例、只走这里。
+        // 不重新进前台的话，这一轮同步没有任何后台保障（还可能触发
+        // ForegroundServiceDidNotStartInTimeException）。
+        if (!foregroundOk) foregroundOk = enterForeground()
         // 不要系统重启服务：同步是"这一次"的事，进程都死了再拉起来也没连接
         return START_NOT_STICKY
     }
@@ -66,6 +82,29 @@ class SyncService : Service() {
     override fun onDestroy() {
         watcher?.cancel()
         super.onDestroy()
+    }
+
+    /**
+     * 进前台。失败不抛异常（onCreate 里抛出去会直接崩），而是把原因写进 engine，
+     * 由界面提示「后台保障不可用，请保持屏幕常亮」。
+     */
+    private fun enterForeground(): Boolean {
+        val n = build(WatchHub.engine.state.value)
+        val r = runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+            } else {
+                startForeground(NOTIF_ID, n)
+            }
+        }
+        if (r.isFailure) {
+            WatchHub.engine.warn(
+                "后台保障未生效（${r.exceptionOrNull()?.message ?: "前台服务启动失败"}）" +
+                    "，锁屏后同步可能被系统中断，建议保持屏幕常亮"
+            )
+            return false
+        }
+        return true
     }
 
     private fun build(st: SyncEngine.State): Notification {
@@ -92,6 +131,8 @@ class SyncService : Service() {
             .setContentText(text)
             .setContentIntent(open)
             .setOngoing(st.running)
+            // 进行中：点一下只会回到 App，不该消失；结束后：点开或滑掉即可清除
+            .setAutoCancel(!st.running)
             .setOnlyAlertOnce(true)
             .setCategory(NotificationCompat.CATEGORY_PROGRESS)
             .setPriority(NotificationCompat.PRIORITY_LOW)
@@ -120,7 +161,7 @@ class SyncService : Service() {
         if (mgr.getNotificationChannel(CHANNEL) != null) return
         mgr.createNotificationChannel(
             NotificationChannel(CHANNEL, "手表同步", NotificationManager.IMPORTANCE_LOW).apply {
-                description = "同步手表日志时显示进度；同步结束后自动消失"
+                description = "同步过程中显示进度；结束后保留一条结果通知，点开即清除"
                 setShowBadge(false)
             }
         )
@@ -139,14 +180,15 @@ class SyncService : Service() {
         private const val NOTIF_ID = 0x5EC4
         private const val ACTION_CANCEL = "com.divelog.app.sync.CANCEL"
 
-        /** 拉起（或复用）前台服务。调用方须已把 engine 置为 running。 */
-        fun start(ctx: Context) {
-            runCatching {
-                val i = Intent(ctx, SyncService::class.java)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(i)
-                else ctx.startService(i)
-            }
-        }
+        /**
+         * 拉起（或复用）前台服务。调用方须已把 engine 置为 running。
+         * @return false 表示服务没拉起来（权限/后台限制），由调用方提示降级。
+         */
+        fun start(ctx: Context): Boolean = runCatching {
+            val i = Intent(ctx, SyncService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) ctx.startForegroundService(i)
+            else ctx.startService(i)
+        }.isSuccess
 
         fun stop(ctx: Context) {
             runCatching { ctx.stopService(Intent(ctx, SyncService::class.java)) }
