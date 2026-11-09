@@ -1,7 +1,9 @@
 package com.divelog.app
 
+import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.ln
+import java.util.Locale
 
 /**
  * ZHL-16C + Gradient Factor 减压内核（纯 Kotlin，无设备可测）。
@@ -97,7 +99,13 @@ object Deco {
         /**
          * 一段线性深度变化的 Schreiner 更新。
          *   P = Palv + (P0 - Palv) * e^(-kt) + R * (t - (1 - e^(-kt))/k)
-         * R = f_gas * (dP/dt) 是惰性气体分压变化率。
+         * 其中 P_alv = f_gas * p0 是**段起始**的吸入惰性气体分压，
+         * R = f_gas * (dp/dt) 是惰性气体分压变化率。
+         *
+         * 坑（2026-11 审查确认）：Palv 必须用 p0，不能用 p1。
+         * 用 p1 再叠加 R 项等于把深度变化算了两遍 —— 下降段负荷虚高、
+         * 上升段过度排气，ceiling 会偏浅。恒深度段 p0==p1 看不出来，
+         * 所以以前的黄金值（全是恒底停）一直没暴露。
          */
         fun addSegment(depth0: Double, depth1: Double, timeMin: Double, g: Gas = gas) {
             if (timeMin <= 0) return   // 瞬时深度跳变：不更新
@@ -108,15 +116,15 @@ object Deco {
             val fn2 = g.n2
             val fhe = g.he
             for (i in 0 until NCOMP) {
-                // 氮气（用段末环境压作为肺泡分压基准）
-                val palvN2 = p1 * fn2
+                // 氮气（肺泡分压基准 = 段起始吸入分压）
+                val palvN2 = p0 * fn2
                 val kN2 = ln(2.0) / N2_HALF_TIMES[i]
                 val rN2 = fn2 * rate
                 pn2[i] = palvN2 + (pn2[i] - palvN2) * exp(-kN2 * timeMin) +
                     rN2 * (timeMin - (1.0 - exp(-kN2 * timeMin)) / kN2)
 
                 // 氦气
-                val palvHe = p1 * fhe
+                val palvHe = p0 * fhe
                 val kHe = ln(2.0) / HE_HALF_TIMES[i]
                 val rHe = fhe * rate
                 phe[i] = palvHe + (phe[i] - palvHe) * exp(-kHe * timeMin) +
@@ -142,8 +150,14 @@ object Deco {
         }
 
         /**
-         * GF99：当前组织过饱和梯度相对 M 值线的百分比（取所有组织最大值）。
+         * GF99 通用式：给定环境压 [pAmb] 下，组织过饱和梯度相对 M 值线的百分比
+         * （取所有组织最大值）。
          *   GF99 = (P_tissue - f*P_amb) / (M - f*P_amb) * 100
+         *
+         * 注意这个函数的语义完全取决于 [pAmb]：
+         *  - 传 [SURFACE_PRESSURE] = 标准定义的「直冲水面 GF99」，见 [gf99Surface]；
+         *  - 传当前深度压 = 「当前深度下的过饱和度」，深水段会恒为 0/负值。
+         * 界面、图表、100% 阈值线一律用前者，别在这里传深度压。
          */
         fun gf99(pAmb: Double): Double {
             val f = gas.inertTotal
@@ -159,6 +173,17 @@ object Deco {
             }
             return worst
         }
+
+        /**
+         * 直冲水面 GF99（%）：假设此刻直接升到水面，组织过饱和占 M 值线的百分比。
+         *
+         * 这才是 GF99 的标准语义（`docs/03` 定义、100% 阈值线、免责文案都按它写），
+         * 也是「这次潜水当时是不是其实已经越线了」唯一能回答的指标。
+         *
+         * 历史教训：2026-11 审查发现调用点传的是当前深度压，导致深水段恒显示 0，
+         * 两条真实潜水（00183 / 00185）已经越过 M 值线却被显示成 85%。别再改回去。
+         */
+        fun gf99Surface(): Double = gf99(SURFACE_PRESSURE)
 
         /**
          * 给定生效 gf，反解天花板深度（m）。
@@ -239,15 +264,26 @@ object Deco {
      * 界面已经不再让人从 [ALGORITHMS] 里挑档位（挑不到 55/75 这种值），
      * 但「多档位对拍」那一页仍然需要离散的样本来对比，所以两套并存。
      */
-    fun algorithmFor(gfLow: Double, gfHigh: Double): Algorithm = Algorithm(
-        id = "gf_${(gfLow * 100).toInt()}_${(gfHigh * 100).toInt()}",
-        name = "GF ${pctInt(gfLow)}/${pctInt(gfHigh)}",
-        gfLow = gfLow,
-        gfHigh = gfHigh,
-        desc = "",
-    )
+    fun algorithmFor(gfLow: Double, gfHigh: Double): Algorithm {
+        // id 和 name 用同一份格式化结果：以前 id 用截断、name 用四舍五入，
+        // GF 30.5 会显示成「GF 31/85」，id 却是 gf_30_85 —— 显示与实际参数对不上。
+        val lo = pct(gfLow)
+        val hi = pct(gfHigh)
+        return Algorithm(
+            id = "gf_${lo}_$hi",
+            name = "GF $lo/$hi",
+            gfLow = gfLow,
+            gfHigh = gfHigh,
+            desc = "",
+        )
+    }
 
-    private fun pctInt(v: Double): String = Math.round(v * 100).toString()
+    /** 百分数文本：整数不带小数点，否则保留一位（30.5 必须显示成 30.5）。 */
+    private fun pct(v: Double): String {
+        val p = v * 100.0
+        val r = Math.round(p).toDouble()
+        return if (abs(p - r) < 1e-6) r.toInt().toString() else String.format(Locale.US, "%.1f", p)
+    }
 
     /** 一条潜水的分析结果。 */
     data class ProfileAnalysis(
@@ -283,11 +319,13 @@ object Deco {
         for (idx in 1 until samples.size) {
             val (t, d) = samples[idx]
             val dtMin = (t - prevT) / 60.0
-            if (dtMin <= 0) { prevT = t; prevD = d; continue }
+            // 时间戳重复/倒退：直接跳过这一段，**不要**把 prev 挪到坏点上 ——
+            // 挪了之后下一段会从坏点开始，等于把时间轴拉长、多积分一截负荷。
+            if (dtMin <= 0) continue
             model.addSegment(prevD, d, dtMin, gas)
 
-            val pAmb = depthToPressure(d)
-            val g99 = model.gf99(pAmb)
+            // GF99 用「直冲水面」口径（水面压），不是当前深度压，见 gf99Surface()
+            val g99 = model.gf99Surface()
             if (g99 > gf99Max) gf99Max = g99
 
             val c = model.ceilingGf(algorithm.gfLow, algorithm.gfHigh, d)
@@ -304,8 +342,14 @@ object Deco {
             prevD = d
         }
 
-        // 出水后补 30 秒，模拟到达水面的最终状态
-        if (prevD > 0) model.addSegment(prevD, 0.0, 0.5, gas)
+        // 出水后补 30 秒到水面：日志经常在水面截断，最后一段上升没记全。
+        // 这一步的 GF99 要计入峰值，否则「出水前那一刻」的风险会被系统性低估。
+        // （以前这段算了不用，是死代码。）
+        if (prevD > 0) {
+            model.addSegment(prevD, 0.0, 0.5, gas)
+            val g = model.gf99Surface()
+            if (g > gf99Max) gf99Max = g
+        }
 
         return ProfileAnalysis(
             gf99Max = gf99Max.coerceAtLeast(0.0),
@@ -386,12 +430,11 @@ object Deco {
         val anchorNdl = ArrayList<Int>()
 
         fun point(s: Sample): SeriesPoint {
-            val pAmb = depthToPressure(s.depth)
             return SeriesPoint(
                 t = s.t,
                 depth = s.depth,
                 temp = s.temp,
-                gf99 = model.gf99(pAmb).coerceAtLeast(0.0),
+                gf99 = model.gf99Surface().coerceAtLeast(0.0),
                 ceiling = model.ceilingGf(algorithm.gfLow, algorithm.gfHigh, s.depth),
             )
         }
@@ -406,14 +449,17 @@ object Deco {
         for (i in 1 until samples.size) {
             val s = samples[i]
             val dt = (s.t - prevT) / 60.0
-            if (dt > 0) model.addSegment(prevD, s.depth, dt, gas)
+            // 时间戳重复/倒退：不积分，也不推进 prev（否则下一段会把时间轴拉长）
+            if (dt > 0) {
+                model.addSegment(prevD, s.depth, dt, gas)
+                prevT = s.t
+                prevD = s.depth
+            }
             out.add(point(s))
             if (stride > 0 && (i % stride == 0 || i == samples.size - 1)) {
                 anchorIdx.add(i)
                 anchorNdl.add(ndlSec(model, algorithm, s.depth))
             }
-            prevT = s.t
-            prevD = s.depth
         }
 
         if (stride == 0) return out

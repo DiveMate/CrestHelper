@@ -129,13 +129,15 @@ class DecoModel(object):
         for i in range(NCOMP):
             pn2, phe = self.tissues[i]
             # 氮气
-            palv_n2 = p1 * fn2          # 用段末环境压作为"肺泡"分压基准
+            # 肺泡分压基准必须是**段起始**吸入分压 p0（不是 p1）：
+            # 用 p1 再叠加 R 项等于把深度变化算了两遍，下降段虚高、上升段过度排气。
+            palv_n2 = p0 * fn2
             k_n2 = math.log(2.0) / N2_HALF_TIMES[i]
             r_n2 = fn2 * rate
             pn2_new = palv_n2 + (pn2 - palv_n2) * math.exp(-k_n2 * time_min) \
                 + r_n2 * (time_min - (1.0 - math.exp(-k_n2 * time_min)) / k_n2)
             # 氦气
-            palv_he = p1 * fhe
+            palv_he = p0 * fhe
             k_he = math.log(2.0) / HE_HALF_TIMES[i]
             r_he = fhe * rate
             phe_new = palv_he + (phe - palv_he) * math.exp(-k_he * time_min) \
@@ -178,13 +180,17 @@ class DecoModel(object):
         return self.gas.n2 + self.gas.he
 
     def gf99(self, p_amb):
-        """GF99：当前组织过饱和梯度相对 M 值线的百分比。
+        """GF99 通用式：给定环境压 p_amb 下的过饱和百分比。
 
             GF99 = (P_tissue - f*P_amb) / (M - f*P_amb) * 100
 
         > 100 表示已经越过 M 值线。取所有组织的最大值。
-        深处通常为负（还在吸氮），上升到浅处转正 —— 这是正常的，
-        峰值出现在上升段/出水点，也正是风险所在。
+
+        语义完全取决于传入的 p_amb：
+          - ``gf99(1.0)``（水面压）= 标准定义的「直冲水面 GF99」，界面用它；
+          - 传当前深度压 = 「当前深度下的过饱和度」，深处会恒为 0/负值。
+        分析/图表一律用 :meth:`gf99_surface`，别传深度压 —— 那样会掩盖
+        深水中段真正越线的时刻（2026-11 审查确认）。
         """
         f = self.inert_fraction_total()
         p_inert = f * p_amb
@@ -199,6 +205,13 @@ class DecoModel(object):
             if g > worst:
                 worst = g
         return worst
+
+    def gf99_surface(self):
+        """直冲水面 GF99（%）：此刻直接升到水面时的过饱和百分比。
+
+        与 docs/03 的定义、100% 阈值线、Kotlin 侧 ``Deco.gf99Surface()`` 同口径。
+        """
+        return self.gf99(SURFACE_PRESSURE)
 
     def _ab(self, i):
         """第 i 组织的 A/B 系数，按组织内 N2/He 比例插值。"""
@@ -328,8 +341,7 @@ def analyze_profile(samples, algorithm, gas=AIR, max_points=400):
             continue
         model.add_segment(prev_d, d, dt_min, gas)
 
-        p_amb = depth_to_pressure(d)
-        g99 = model.gf99(p_amb)
+        g99 = model.gf99_surface()
         if g99 > gf99_max:
             gf99_max = g99
         c = model.ceiling_gf(gf_low, gf_high, d)
@@ -405,14 +417,14 @@ def _selftest():
     print("  ceiling(ZHL-16C) = %.2f m" % m.ceiling())
     print("  ceiling(GF30/85) = %.2f m" % m.ceiling_gf(0.30, 0.85, 30.0))
     print("  ceiling(GF50/70) = %.2f m" % m.ceiling_gf(0.50, 0.70, 30.0))
-    print("  GF99 = %.1f" % m.gf99(depth_to_pressure(30)))
+    print("  GF99(水面口径) = %.1f" % m.gf99_surface())
 
     # 3) 上升到 10m 时天花板应更高（GF low 生效）
     m2 = m.copy()
     m2.add_segment(30, 10, 2.0)
     print("\n上升到 10m 后：")
     print("  ceiling(GF30/85) = %.2f m" % m2.ceiling_gf(0.30, 0.85, 10.0))
-    print("  GF99 = %.1f" % m2.gf99(depth_to_pressure(10)))
+    print("  GF99(水面口径) = %.1f" % m2.gf99_surface())
 
     # 4) 单调性：底停越久，组织越接近饱和，同深度 GF99 越高
     prev = -1e9
@@ -421,7 +433,7 @@ def _selftest():
         mm = DecoModel(AIR)
         mm.add_segment(0, 30, 1.0)
         mm.add_segment(30, 30, float(bottom))
-        g = mm.gf99(depth_to_pressure(30))
+        g = mm.gf99_surface()
         if g < prev:
             ok = False
         prev = g

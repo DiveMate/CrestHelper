@@ -8,8 +8,11 @@ import org.junit.Test
 /**
  * L1 测试：减压内核数值回归。
  *
- * 黄金值全部来自 Python 版 `dive/tools/deco.py` 的 _selftest 输出，
- * 两端必须逐位一致 —— 这样以后改 Kotlin 不会悄悄偏离已验证的 Python 基准。
+ * 黄金值来自 Python 版 `tools/deco.py` 的 _selftest 输出（2026-11 修正 Schreiner
+ * 肺泡压基准后重算），两端必须一致 —— 这样以后改 Kotlin 不会悄悄偏离已验证的基准。
+ *
+ * 注意：黄金值里有升降段的对拍用例 [schreiner_segment_matches_numeric_integration]，
+ * 因为「恒底停」恰好是 Schreiner p0/p1 写错也看不出来的情形。
  */
 class DecoTest {
 
@@ -20,7 +23,7 @@ class DecoTest {
     fun `surface_equilibrium_gf99_should_be_zero`() {
         val m = Deco.DecoModel()
         m.addSurfaceInterval(600.0)   // 10 小时
-        assertNear(0.0, m.gf99(1.0), 0.01)
+        assertNear(0.0, m.gf99Surface(), 0.01)
     }
 
     @Test
@@ -36,9 +39,36 @@ class DecoTest {
         m.addSegment(0.0, 30.0, 1.0)
         m.addSegment(30.0, 30.0, 20.0)
 
-        assertNear(1.68, m.ceiling())                     // ZHL-16C 原始
-        assertNear(15.24, m.ceilingGf(0.30, 0.85, 30.0)) // GF30/85
-        assertNear(9.73, m.ceilingGf(0.50, 0.70, 30.0))  // GF50/70
+        assertNear(1.46, m.ceiling())                     // ZHL-16C 原始
+        assertNear(15.13, m.ceilingGf(0.30, 0.85, 30.0)) // GF30/85
+        assertNear(9.43, m.ceilingGf(0.50, 0.70, 30.0))  // GF50/70
+        // 水面口径的 GF99（标准定义）：已经越过 M 值线
+        assertNear(112.8, m.gf99Surface(), 0.2)
+    }
+
+    /**
+     * Schreiner 段积分 vs 细分数值积分。
+     *
+     * 2026-11 审查发现 addSegment 把 p1 当肺泡压基准（叠加 R 项等于把深度变化算两遍）：
+     * 下降段高估负荷、上升段过度排气。旧的黄金值全是恒底停，恰好测不出来。
+     */
+    @Test
+    fun `schreiner_segment_matches_numeric_integration`() {
+        // 第一组织（N2 半时 4 min）从水面平衡 0.79 bar 出发
+        val cases = listOf(
+            Triple(0.0, 30.0, 1.0) to 0.983980,
+            Triple(0.0, 30.0, 100.0) to 3.023233,
+            Triple(30.0, 10.0, 2.0) to 1.239433,
+        )
+        for ((seg, expect) in cases) {
+            val (d0, d1, min) = seg
+            val m = Deco.DecoModel()
+            m.addSegment(d0, d1, min)
+            assertEquals(
+                "段 $d0→$d1 m / $min min 与数值积分不符",
+                expect, m.tissuePressure(0), 1e-4,
+            )
+        }
     }
 
     @Test
@@ -63,13 +93,14 @@ class DecoTest {
         val m = Deco.DecoModel()
         m.addSegment(0.0, 30.0, 1.0)
         m.addSegment(30.0, 30.0, 20.0)
-        assertNear(-1.1, m.gf99(Deco.depthToPressure(30.0)), 0.15)
+        // 水面口径：30m/20min 已经越过 M 值线（旧测试用当前深度压，恒为负，测不出风险）
+        assertNear(112.8, m.gf99Surface(), 0.3)
 
         val m2 = m.copy()
         m2.addSegment(30.0, 10.0, 2.0)
 
-        assertNear(9.75, m2.ceilingGf(0.30, 0.85, 10.0))   // 黄金值
-        assertNear(35.8, m2.gf99(Deco.depthToPressure(10.0)), 0.15)
+        assertNear(10.02, m2.ceilingGf(0.30, 0.85, 10.0))   // 黄金值
+        assertNear(110.2, m2.gf99Surface(), 0.3)
     }
 
     @Test
@@ -80,10 +111,28 @@ class DecoTest {
             val m = Deco.DecoModel()
             m.addSegment(0.0, 30.0, 1.0)
             m.addSegment(30.0, 30.0, bottom)
-            val g = m.gf99(Deco.depthToPressure(30.0))
+            val g = m.gf99Surface()
             assertTrue("底停 $bottom min 的 GF99($g) 不应低于前一档($prev)", g >= prev)
             prev = g
         }
+        // 30m 底停 20 min 的绝对值也锁一下，防止整体比例漂移
+        assertNear(112.8, gf99At30m(20.0), 0.3)
+    }
+
+    private fun gf99At30m(bottom: Double): Double {
+        val m = Deco.DecoModel()
+        m.addSegment(0.0, 30.0, 1.0)
+        m.addSegment(30.0, 30.0, bottom)
+        return m.gf99Surface()
+    }
+
+    @Test
+    fun `analyze_profile_gf99_uses_surface_definition`() {
+        // 30m 底停 25 分钟：按当前深度口径会算成负值/0（旧实现的问题），
+        // 直冲水面口径必须明显越过 100%。
+        val samples = listOf(0 to 0.0, 60 to 30.0, 1560 to 30.0)
+        val res = Deco.analyzeProfile(samples, Deco.ALGORITHMS[1])
+        assertTrue("水面口径 GF99 应 >100，实际 ${res.gf99Max}", res.gf99Max > 100)
     }
 
     @Test
@@ -92,8 +141,8 @@ class DecoTest {
         m.addSegment(0.0, 30.0, 1.0)
         m.addSegment(30.0, 30.0, 40.0)
         m.addSegment(30.0, 0.0, 0.1)     // 6 秒冲到水面
-        assertNear(149.4, m.gf99(1.0), 0.5)
-        assertTrue("应远超 100", m.gf99(1.0) > 100)
+        assertNear(148.5, m.gf99Surface(), 0.5)
+        assertTrue("应远超 100", m.gf99Surface() > 100)
     }
 
     @Test
