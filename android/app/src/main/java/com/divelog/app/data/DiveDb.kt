@@ -72,7 +72,6 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
             "CREATE UNIQUE INDEX idx_dive_watch ON dive(device_id, watch_index) " +
                 "WHERE device_id IS NOT NULL AND watch_index IS NOT NULL"
         )
-
         db.execSQL(
             """
             CREATE TABLE sample (
@@ -152,6 +151,20 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
             db.execSQL("ALTER TABLE dive ADD COLUMN suit TEXT")
             db.execSQL("ALTER TABLE dive ADD COLUMN site_tags TEXT")
         }
+        // 索引也要补：onCreate 建了 4 个，onUpgrade 以前一个都没建，
+        // 从旧版本升上来的库列表页会全表扫描（新装的库反而更快）。
+        if (oldVersion < DB_VERSION) ensureIndexes(db)
+    }
+
+    /** 幂等补索引（onUpgrade 用；onCreate 里是首次创建，写法保持原样）。 */
+    private fun ensureIndexes(db: SQLiteDatabase) {
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_dive_time  ON dive(datetime)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_dive_group ON dive(group_id)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS idx_dive_src   ON dive(source)")
+        db.execSQL(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_dive_watch ON dive(device_id, watch_index) " +
+                "WHERE device_id IS NOT NULL AND watch_index IS NOT NULL"
+        )
     }
 
     // ------------------------------------------------------------------ 写入
@@ -208,6 +221,9 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
                         userDeleted = m.userDeleted || old.userDeleted,
                         groupId = m.groupId ?: old.groupId,
                         mergeKind = if (m.mergeKind != MergeKind.NONE) m.mergeKind else old.mergeKind,
+                        // 过滤标记也是用户意图（通常是自动规则打的）：不带回来，
+                        // 任何不经 materialize 重建的 insertAll 都会把它永久抹掉。
+                        filterReason = m.filterReason ?: old.filterReason,
                         /* 手填的潜点/能见度/穿着/标签同样属于用户意图：
                          * 新解析结果里这几列永远是空的，不带上就是"重同步一次全丢"。 */
                         siteName = old.siteName ?: m.siteName,
@@ -370,7 +386,10 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
         val db = writableDatabase
         val key = memberIds.sorted().joinToString(",")
         val existing = manualGroups().firstOrNull { it.sorted().joinToString(",") == key }?.let { groupIdOf(it) }
-        val id = existing ?: "manual_${now}_${memberIds.size}"
+        // id 必须唯一：以前是 "manual_${now}_${成员数}"，seed 迁移旧 prefs 时
+        // 同一毫秒且成员数相同的两个不同组会拿到同一个 id，INSERT OR REPLACE 后
+        // 两组被并成一组，拆一个就等于拆全部。加一段随机后缀彻底避免。
+        val id = existing ?: "manual_${now}_${memberIds.size}_${newGroupSuffix()}"
         db.beginTransaction()
         try {
             db.execSQL(
@@ -391,6 +410,10 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
         }
         return id
     }
+
+    /** 短随机后缀：手动组 id 只用于去重，不需要可读。 */
+    private fun newGroupSuffix(): String =
+        java.util.UUID.randomUUID().toString().replace("-", "").take(8)
 
     /** 拆掉一个手动组（成员回到独立状态）。 */
     fun removeManualGroup(groupId: String) {
@@ -709,7 +732,7 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
     private fun oldMarkers(db: SQLiteDatabase, id: String): DiveMeta? =
         db.rawQuery(
             "SELECT favorite, gas_o2, gas_he, gas_src, user_deleted, group_id, merge_kind, " +
-                "site_name, visibility_m, suit, site_tags FROM dive WHERE id = ?",
+                "filter_reason, site_name, visibility_m, suit, site_tags FROM dive WHERE id = ?",
             arrayOf(id)
         ).use { c ->
             if (!c.moveToFirst()) return null
@@ -723,10 +746,11 @@ class DiveDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, null, DB_VER
                 userDeleted = c.getInt(4) != 0,
                 groupId = if (c.isNull(5)) null else c.getString(5),
                 mergeKind = MergeKind.of(if (c.isNull(6)) null else c.getString(6)),
-                siteName = if (c.isNull(7)) null else c.getString(7),
-                visibilityM = if (c.isNull(8)) null else c.getDouble(8),
-                suit = SuitKind.of(if (c.isNull(9)) null else c.getString(9)),
-                tags = DiveTag.parse(if (c.isNull(10)) null else c.getString(10)),
+                filterReason = FilterReason.of(if (c.isNull(7)) null else c.getString(7)),
+                siteName = if (c.isNull(8)) null else c.getString(8),
+                visibilityM = if (c.isNull(9)) null else c.getDouble(9),
+                suit = SuitKind.of(if (c.isNull(10)) null else c.getString(10)),
+                tags = DiveTag.parse(if (c.isNull(11)) null else c.getString(11)),
             )
         }
 

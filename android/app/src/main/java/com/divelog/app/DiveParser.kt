@@ -1,6 +1,7 @@
 package com.divelog.app
 
 import org.json.JSONObject
+import java.util.Locale
 
 /**
  * libdc (libdivecomputer) JNI 包装：把下载到的原始 dive 字节解析成结构化数据。
@@ -47,8 +48,11 @@ object DiveParser {
         /** 记录里带的气体表；空表示这份记录没写气体（此时无法判断是否高氧）。 */
         val gases: List<Gas> = emptyList(),
     ) {
-        val dateText: String get() = "%04d-%02d-%02d %02d:%02d:%02d".format(year, month, day, hour, minute, second)
-        val durationText: String get() = "%d:%02d".format(divetime / 60, divetime % 60)
+        // 必须显式 Locale.US：默认 Locale 在阿拉伯语/波斯语等地区会把 %04d 输出成本地数字，
+        // 之后 datetime 解析失败、归零，统计与去重签名全跟着坏。
+        val dateText: String
+            get() = String.format(Locale.US, "%04d-%02d-%02d %02d:%02d:%02d", year, month, day, hour, minute, second)
+        val durationText: String get() = String.format(Locale.US, "%d:%02d", divetime / 60, divetime % 60)
 
         /** 主力气体：出现在剖面里的第一种；没有气体信息时为 null。 */
         val primaryGas: Gas? get() = gases.firstOrNull()
@@ -88,12 +92,16 @@ object DiveParser {
             val samples = ArrayList<Sample>(arr?.length() ?: 0)
             if (arr != null) {
                 for (i in 0 until arr.length()) {
-                    val e = arr.getJSONObject(i)
+                    // 单个采样点缺字段只丢这个点，不要把整条潜水判成解析失败
+                    val e = arr.optJSONObject(i) ?: continue
+                    if (!e.has("t") || !e.has("depth")) continue
+                    val depth = e.optDouble("depth", Double.NaN)
+                    if (!depth.isFinite()) continue
                     samples.add(Sample(
-                        t = e.getInt("t"),
-                        depth = e.getDouble("depth"),
-                        temp = if (e.has("temp") && !e.isNull("temp")) e.getDouble("temp") else null,
-                        gas = if (e.has("g") && !e.isNull("g")) e.getInt("g") else null,
+                        t = e.optInt("t"),
+                        depth = depth,
+                        temp = if (e.has("temp") && !e.isNull("temp")) e.optDouble("temp").takeIf { it.isFinite() } else null,
+                        gas = if (e.has("g") && !e.isNull("g")) e.optInt("g") else null,
                     ))
                 }
             }

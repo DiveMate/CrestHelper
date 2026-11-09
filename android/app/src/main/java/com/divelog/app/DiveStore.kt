@@ -150,7 +150,9 @@ data class DecoSettings(
         fun fmt(v: Double): String {
             val r = Math.round(v).toDouble()
             return if (abs(v - r) < 1e-6) r.toInt().toString()
-            else String.format(Locale.US, "%.0f", v)
+            // 一度写成 "%.0f"：GF 30.5 存得进去，回显却变成 "31"，
+            // 用户接着输入就变成 315（非法），详情页算法卡也跟着显示错的值。
+            else String.format(Locale.US, "%.1f", v)
         }
     }
 }
@@ -347,13 +349,24 @@ object DiveEntries {
         for (r in records) {
             val s = samplesOf(r)
             if (s.isEmpty()) continue
-            val offset = ((Analytics.startMillis(r) - t0) / 1000L).toInt()
-            if (prevEndT >= 0 && offset > prevEndT) {
-                out.add(Sample(prevEndT, 0.0, null))
-                out.add(Sample(offset, 0.0, null))
+            val planned = ((Analytics.startMillis(r) - t0) / 1000L).toInt()
+            var start = planned
+            if (prevEndT >= 0) {
+                if (planned > prevEndT) {
+                    // 真实水面间隔：插两个 0m 点，让这段排气时间进积分
+                    out.add(Sample(prevEndT, 0.0, null))
+                    out.add(Sample(planned, 0.0, null))
+                } else {
+                    // 记录时间重叠（手动合并了同时段两条 / 手表时间被改过）：
+                    // 原来直接 append 会让时间轴倒退 —— 图表画到坐标轴外，
+                    // Deco.analyzeProfile 的 dt<=0 分支又会把这段负荷整个丢掉。
+                    // 这里整体后移到上一条结束之后，至少保证严格递增。
+                    start = prevEndT + 1
+                }
             }
             val base = s.first().t
-            for (p in s) out.add(Sample(offset + (p.t - base), p.depth, p.temp, p.gas))
+            val shift = start - planned
+            for (p in s) out.add(Sample(shift + planned + (p.t - base), p.depth, p.temp, p.gas))
             prevEndT = out.last().t
         }
         return out

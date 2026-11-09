@@ -6,6 +6,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -19,7 +20,9 @@ import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -39,6 +42,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -69,7 +73,11 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            MaterialTheme {
+            // 之前写死 MaterialTheme()（等价于浅色）：系统开深色模式时整个界面还是白的。
+            // 图表用的是 colorScheme 里的 primary/outlineVariant/onSurfaceVariant，跟着一起变。
+            MaterialTheme(
+                colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme(),
+            ) {
                 Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     DiveApp()
                 }
@@ -106,7 +114,9 @@ fun DiveApp() {
 
     var data by remember { mutableStateOf<DiveDataSet?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
-    var tab by remember { mutableIntStateOf(0) }
+    // 这几个是"用户看得到的当前位置"：旋转/进程重建后必须原样恢复，
+    // 否则会跳回日志列表、或者把已经看过的同步结果再弹一遍。
+    var tab by rememberSaveable { mutableIntStateOf(0) }
 
     var settings by remember { mutableStateOf(prefs.settings) }
     var junkRule by remember { mutableStateOf(prefs.junkRule) }
@@ -117,10 +127,10 @@ fun DiveApp() {
     var pairedName by remember { mutableStateOf(prefs.pairedName) }
     var manualGroups by remember { mutableStateOf<List<List<String>>>(emptyList()) }
 
-    var openId by remember { mutableStateOf<String?>(null) }
-    var showSync by remember { mutableStateOf(false) }
-    var showRecycle by remember { mutableStateOf(false) }
-    var showCleanup by remember { mutableStateOf(false) }
+    var openId by rememberSaveable { mutableStateOf<String?>(null) }
+    var showSync by rememberSaveable { mutableStateOf(false) }
+    var showRecycle by rememberSaveable { mutableStateOf(false) }
+    var showCleanup by rememberSaveable { mutableStateOf(false) }
     var importing by remember { mutableStateOf(false) }
     var importedCount by remember { mutableIntStateOf(0) }
 
@@ -147,7 +157,9 @@ fun DiveApp() {
      * 这样即使同步进行到一半退出了同步页、锁屏、甚至 Activity 重建，
      * 完成之后数据照样会自动刷新一遍，不用用户回来手动下拉。
      */
-    var seenSyncTick by remember { mutableIntStateOf(0) }
+    // 必须用 rememberSaveable：finishedTick 挂在进程级引擎上，旋转后仍然 >0，
+    // 而这个值如果归零，就会把「同步完成」的 Snackbar 重放一遍并重复 reload()。
+    var seenSyncTick by rememberSaveable { mutableIntStateOf(0) }
     LaunchedEffect(syncState.finishedTick) {
         if (syncState.finishedTick == seenSyncTick) return@LaunchedEffect
         seenSyncTick = syncState.finishedTick

@@ -98,11 +98,24 @@ class ImportedStore(private val dir: File) {
     private val divesFile: File get() = File(dir, "dives.csv")
     private val samplesFile: File get() = File(dir, "samples.csv")
 
+    /**
+     * 上一次 [load] 的解析错误（null = 正常）。
+     *
+     * 以前这里把异常悄悄吞成空列表：文件损坏时旧版导入记录会**永久**迁移不过来
+     * （库一旦被内置数据填满，`db.isEmpty()` 就永远为假），而且没有任何提示。
+     */
+    var lastError: String? = null
+        private set
+
     fun load(): DiveDataSet {
+        lastError = null
         if (!divesFile.exists()) return DiveDataSet(emptyList(), emptyMap())
-        val dives = runCatching {
+        val dives = try {
             divesFile.bufferedReader().use { DiveCsv.parseDives(it) }
-        }.getOrElse { emptyList() }
+        } catch (e: Exception) {
+            lastError = "旧导入记录 dives.csv 读取失败：${e.message ?: e::class.java.simpleName}"
+            return DiveDataSet(emptyList(), emptyMap())
+        }
         val samples = if (samplesFile.exists()) {
             runCatching {
                 samplesFile.bufferedReader().use { DiveCsv.parseSamples(it) }

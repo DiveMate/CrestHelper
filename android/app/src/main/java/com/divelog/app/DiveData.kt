@@ -1,6 +1,7 @@
 package com.divelog.app
 
 import android.content.Context
+import android.util.Log
 import com.divelog.app.data.AutoGroup
 import com.divelog.app.data.DiveAnnotation
 import com.divelog.app.data.DiveDb
@@ -26,6 +27,8 @@ import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import kotlin.math.abs
+
+private const val TAG = "CrestHelper"
 
 /**
  * 数据层：把桌面端解析好的真实潜水数据（data/dives.csv + samples.csv）
@@ -311,6 +314,12 @@ class SampleCache(
             // 界面销毁不算失败：保留已读到的，下次接着补
             _state.value = _state.value.copy(loading = false)
             throw e
+        } catch (e: Exception) {
+            // SQLite/IO 出错也必须复位 loading：否则 _state 永远停在 loading=true，
+            // 之后连 loadAll(force=true) 都会被 `if (snap.loading) return` 挡住，
+            // 剖面永久卡死，只能杀进程。
+            _state.value = _state.value.copy(loading = false)
+            throw e
         }
 
         return Snapshot(
@@ -393,6 +402,7 @@ class DiveRepository(private val ctx: Context) {
     suspend fun load(force: Boolean = false): DiveDataSet = withContext(Dispatchers.IO) {
         cached?.takeIf { !force }?.let { return@withContext it }
         seedIfNeeded()
+        migrateLegacyCsv()
         backfillSummariesIfNeeded()
         val ds = DiveDataSet(
             dives = db.allDives(),
@@ -443,24 +453,49 @@ class DiveRepository(private val ctx: Context) {
             )
         }
 
-        // 旧版本用 CSV 存导入记录，这里搬进库（文件保留不删，出问题能回退）
-        val legacy = legacyStore.load()
-        for (d in legacy.dives) {
-            val s = legacy.samples[d.file] ?: emptyList()
-            rows.add(
-                DiveRow(
-                    dive = d.withSummary(s),
-                    samples = s,
-                    meta = DiveMeta(id = d.file, source = DiveSource.FILE, importedAt = now),
-                )
-            )
-        }
+        // 旧版本用 CSV 存导入记录，搬进库；失败保留文件，下次启动再试（见 migrateLegacyCsv）
         db.insertAll(rows)
 
         // 旧设置里的软删除/手动合并，迁成标记位
         val prefs = DivePrefs(ctx)
         if (prefs.deleted.isNotEmpty()) db.setUserDeleted(prefs.deleted, true)
         for (g in prefs.manualGroups) runCatching { db.saveManualGroup(g) }
+    }
+
+    /**
+     * 旧版 CSV（filesDir/imported）→ SQLite 的一次性迁移。
+     *
+     * 以前这段挂在「库为空」的 seed 里：文件一旦损坏就被静默吞成空列表，
+     * 而库被内置数据填满后 `db.isEmpty()` 永远为假，旧导入记录**永久**迁不过来，
+     * 用户还看不到任何提示。现在每次冷启动都会检查，成功后写 `.migrated` 标记；
+     * 失败则保留文件、下次再试。
+     */
+    private fun migrateLegacyCsv() {
+        val dir = File(ctx.filesDir, "imported")
+        if (!dir.exists() || File(dir, ".migrated").exists()) return
+        val legacy = legacyStore.load()
+        legacyStore.lastError?.let {
+            Log.w(TAG, "$it（文件保留，下次启动再试）")
+            return
+        }
+        if (legacy.dives.isNotEmpty()) {
+            val now = System.currentTimeMillis()
+            val rows = legacy.dives.map { d ->
+                val s = legacy.samples[d.file] ?: emptyList()
+                DiveRow(
+                    dive = d.withSummary(s),
+                    samples = s,
+                    meta = DiveMeta(id = d.file, source = DiveSource.FILE, importedAt = now),
+                )
+            }
+            try {
+                db.insertAll(rows)
+            } catch (e: Exception) {
+                Log.w(TAG, "旧导入记录迁移失败（下次启动再试）：${e.message}")
+                return
+            }
+        }
+        runCatching { File(dir, ".migrated").writeText("ok\n") }
     }
 
     /**

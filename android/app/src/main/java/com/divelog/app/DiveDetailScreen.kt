@@ -196,7 +196,9 @@ fun DiveDetailScreen(
             }
             Text(
                 "最小安全深度 = 当前算法下的天花板，不能比它更浅；" +
-                    "NDL = 继续停留到出现减压义务的时间，「已减压」表示该时刻已背着义务。",
+                    "NDL = 继续停留到出现减压义务的时间，「已减压」表示该时刻已背着义务；" +
+                    "GF99 = 此刻直接升到水面的过饱和度，>100% 即越过原始 M 值线。" +
+                    "整条潜水按单一气体（${entry.gasLabel.substringBefore(" · ")}）计算，中途换气暂未计入。",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

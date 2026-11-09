@@ -93,15 +93,27 @@ object Analysis {
                 Analytics.startMillis(first)) / 1000L).toInt()
             if (anyBad || maxD < DiveMerger.DEFAULT_MIN_DEPTH || span < DiveMerger.MIN_DURATION_S) continue
 
-            val records = g.map { d ->
-                DiveMerger.DiveRecord(
-                    id = d.no,
-                    startMillis = Analytics.startMillis(d),
-                    durationSec = d.divetimeS,
-                    maxDepth = d.maxdepthM,
-                    samples = (samples[d.file] ?: emptyList()).map { Triple(it.t, it.depth, it.temp) },
+            // 合并组的每一段剖面都必须到齐再积分：少一段就等于跳过了那段的吸氮，
+            // 会算出偏乐观的结论（这正是本页注释里说要避免的"0 减压"假结果）。
+            var missingProfile = false
+            val records = ArrayList<DiveMerger.DiveRecord>(g.size)
+            for (d in g) {
+                val s = samples[d.file] ?: emptyList()
+                if (s.isEmpty()) {
+                    missingProfile = true
+                    break
+                }
+                records.add(
+                    DiveMerger.DiveRecord(
+                        id = d.no,
+                        startMillis = Analytics.startMillis(d),
+                        durationSec = d.divetimeS,
+                        maxDepth = d.maxdepthM,
+                        samples = s.map { Triple(it.t, it.depth, it.temp) },
+                    )
                 )
             }
+            if (missingProfile) continue
             val merged = DiveMerger.mergeGroup(records, mergedId = first.no) ?: continue
             if (merged.profile.isEmpty()) continue
 

@@ -59,8 +59,9 @@ object DiveMerger {
             val p = prev
             if (p != null) {
                 val si = d.surfaceIntervalAfter(p)
-                // 间隔 > 阈值 或 时间倒退 => 视为新的一次潜水
-                if (si > siThreshold || si < 0) {
+                // 与生产口径 Analytics.mergeGroups 保持一致：只有"间隔超过阈值"才拆，
+                // 时间重叠（si < 0）按同一次潜水处理（否则两处算出的组数不一样）。
+                if (si > siThreshold) {
                     groups.add(cur)
                     cur = ArrayList()
                 }

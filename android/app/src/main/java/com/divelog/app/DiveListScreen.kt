@@ -32,6 +32,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -66,11 +68,14 @@ fun DiveListScreen(
     profileLoaded: Int = 0,
     profileTotal: Int = 0,
 ) {
-    var year by remember { mutableStateOf<Int?>(null) }
-    var month by remember { mutableStateOf<Int?>(null) }
-    var favOnly by remember { mutableStateOf(false) }
-    var selecting by remember { mutableStateOf(false) }
-    var selected by remember { mutableStateOf<Set<String>>(emptySet()) }
+    // 筛选/多选：旋转屏幕后要原样恢复，否则用户刚筛好的年份、勾好的一批记录全丢
+    var year by rememberSaveable { mutableStateOf<Int?>(null) }
+    var month by rememberSaveable { mutableStateOf<Int?>(null) }
+    var favOnly by rememberSaveable { mutableStateOf(false) }
+    var selecting by rememberSaveable { mutableStateOf(false) }
+    var selected by rememberSaveable(
+        stateSaver = listSaver<Set<String>, String>(save = { it.toList() }, restore = { it.toSet() }),
+    ) { mutableStateOf(emptySet()) }
     // 长按展开的那一条（同一时刻只展开一条）
     var pressed by remember { mutableStateOf<String?>(null) }
 
