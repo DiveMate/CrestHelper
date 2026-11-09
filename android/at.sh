@@ -180,17 +180,29 @@ build)
         # --- 16 KB 页对齐检查（Android 15+ 硬要求）---
         # NDK r27 默认按 4KB(0x1000) 链接；漏加 max-page-size=16384 时，
         # 16KB 页设备会装不上/起不来，4KB 设备则弹「应用兼容性」警告。
-        so="$PROJ/app/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/arm64-v8a/libdcbridge.so"
-        readelf=$(ls "$ANDROID_HOME"/ndk/*/toolchains/llvm/prebuilt/*/bin/llvm-readelf.exe 2>/dev/null | head -1)
-        if [ -f "$so" ] && [ -n "$readelf" ]; then
-            # Windows 版 llvm-readelf 输出带 CRLF，$NF 会粘上 \r，必须先去掉
-            align=$("$readelf" -l "$so" 2>/dev/null | awk '/LOAD/{print $NF; exit}' | tr -d '\r')
-            if [ "$align" = "0x4000" ]; then
-                ok "libdcbridge.so 16KB 对齐 ($align)"
-            else
-                bad "libdcbridge.so 未按 16KB 对齐（当前 $align），16KB 页设备会失败"
+        check_16k() {
+            local so="$1" variant="$2" readelf target align
+            [ -f "$so" ] || return 0
+            # Windows 版叫 llvm-readelf.exe，Linux/macOS 没有后缀，两种都找
+            readelf=$(ls "$ANDROID_HOME"/ndk/*/toolchains/llvm/prebuilt/*/bin/llvm-readelf 2>/dev/null | head -1)
+            [ -n "$readelf" ] || readelf=$(ls "$ANDROID_HOME"/ndk/*/toolchains/llvm/prebuilt/*/bin/llvm-readelf.exe 2>/dev/null | head -1)
+            if [ -z "$readelf" ]; then
+                warn "找不到 llvm-readelf，跳过 16KB 对齐检查（$variant）"
+                return 0
             fi
-        fi
+            # 必须转成 Windows 路径：调用方常带 MSYS_NO_PATHCONV=1，此时 exe 收到 /d/...
+            # 会读不到文件、静默输出空值（以前就因此每次误报 [FAIL]）。
+            target="$so"
+            command -v cygpath >/dev/null 2>&1 && target="$(cygpath -w "$so")"
+            align=$("$readelf" -l "$target" 2>/dev/null | awk '/LOAD/{print $NF; exit}' | tr -d '\r')
+            if [ "$align" = "0x4000" ]; then
+                ok "libdcbridge.so 16KB 对齐（$variant, $align）"
+            else
+                bad "libdcbridge.so 未按 16KB 对齐（$variant，当前 ${align:-空}），16KB 页设备会失败"
+                return 1
+            fi
+        }
+        check_16k "$PROJ/app/build/intermediates/merged_native_libs/debug/mergeDebugNativeLibs/out/lib/arm64-v8a/libdcbridge.so" debug || exit 1
     else
         bad "构建失败"
         grep -E "^e: |error:|FAILED|CMake Error" "$LOGDIR/build.log" | head -20
