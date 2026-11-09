@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 深色模式：只影响 Compose 首帧之前的窗口底色，避免开 App 时闪一下白屏。
+         Compose 侧的配色在 MainActivity 里按 isSystemInDarkTheme() 切换。 -->
+    <style name="Theme.DiveLogger" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">#0B3D5C</item>
+        <item name="android:windowBackground">#121212</item>
+    </style>
+</resources>

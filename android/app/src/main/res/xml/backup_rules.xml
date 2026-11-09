@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 11 及以下的备份规则。
+
+  这个 App 承诺「无账号、无云同步，数据只在本机」，所以数据库（原始记录 + 逐点剖面 +
+  手填潜点）和 shared_prefs（paired_address 是真实 BLE MAC）都不进备份。
+  application 上同时设了 allowBackup=false，这里再显式列一遍，防止 OEM 忽略前者的极端情况。
+-->
+<full-backup-content>
+    <exclude domain="database" path="." />
+    <exclude domain="sharedpref" path="." />
+    <exclude domain="file" path="." />
+    <exclude domain="external" path="." />
+</full-backup-content>
