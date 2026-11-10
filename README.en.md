@@ -203,6 +203,12 @@ be used for planning a dive, and must not be used to judge whether any particula
 Their purpose is comparing "what would change with a different GF under the same profile", not issuing
 a safety verdict on a dive. Plan with trained procedures and your own computer.
 
+The decompression kernel was recalibrated in **v0.1.4** (standard ZHL-16C tissue table,
+alveolar water vapour subtraction, and an anchored analytic GF ceiling). As a result,
+GF99 / min safe depth / deco time **must not be compared across app versions**; only
+comparisons between GF settings within the same version are meaningful. See
+[03 - Log analysis and algorithm design](docs/03-日志分析与算法设计.md) for the formulas.
+
 ## Docs
 
 | Doc | Content |

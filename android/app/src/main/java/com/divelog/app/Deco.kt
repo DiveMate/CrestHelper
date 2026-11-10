@@ -8,24 +8,43 @@ import java.util.Locale
 /**
  * ZHL-16C + Gradient Factor 减压内核（纯 Kotlin，无设备可测）。
  *
- * 与 Python 版 `dive/tools/deco.py` 逐行对应，数值已对拍一致。
- * deco.py 自检的黄金值（30m/20min: ceiling ZHL=1.68, GF30/85=15.24, GF50/70=9.73）
- * 在 [DecoTest] 里作为回归基准锁死。
+ * 与 Python 版 `tools/deco.py` 逐行对应，数值已对拍一致；黄金值在 [DecoTest] 里锁死。
+ *
+ * v0.1.4 算法口径校准（2026-11-10，对齐 Subsurface core/deco.cpp 与自写的
+ * deco-planner server/app/deco_engine/buhlmann.py）：
+ *  1. 参数表换成**标准 ZHL-16C**。旧版 N2 首半时 4.0（应 5.0）、N2 a 系数是
+ *     ZHL-16B 那套、He 半时是「N2 半时 ÷ 2.65」推出来的 —— 标着 16C 其实不是。
+ *  2. 吸入惰性气体分压扣肺泡水蒸气 0.0627 bar，组织初值同样按
+ *     (p_surface - p_wv) * f 平衡；水面压 1.01325 bar、海水密度 1.03 kg/L。
+ *  3. GF 天花板改用「冻结第一减压站锚点 + 压力空间割线解析解」，不再逐点
+ *     重算锚点、也不再按当前深度线性插值 gf（旧解法系统性过度保守）。
  *
  * 关键坑（勿改）：
  *  1. 组织压力是**惰性气体分压**，而 M 值线 M = A + P_amb/B 用的是**总环境压**。
- *     两者量纲不同，GF99 计算必须用 P_inert = f * P_amb（f = fN2 + fHe）。
- *     漏掉这步：水面平衡会算出 GF99 = -10.7 而不是 0。
- *  2. GF ceiling 的锚点必须用 gf_low（第一减压站）：
- *     先求 c_low；若当前深度还深于 c_low 则 ceiling = c_low；
- *     否则按 depth/c_low 插值 gf。早先用 gf_high 做锚点会导致
- *     gf_low 完全失效（GF30/85 义务反少于 GF50/70）。
+ *     GF/GF99 的基线必须用 P_inert = f * (P_amb - p_wv)。漏掉这步：水面平衡
+ *     会算出 GF99 ≠ 0，100% 阈值线也不再对应 M 值线。
+ *  2. a/b 按组织内 N2/He 负荷**线性插值**（Subsurface 同），不是对 1/b 插值。
+ *     水蒸气只作用于吸入分压与初始饱和，不进 M 值线公式。
+ *  3. GF ceiling 由组织状态决定，与当前深度无关；第一减压站锚点必须按整条
+ *     潜水取历史最大值并冻结，否则会随排气漂移。
+ *  4. NDL 判据用 [DecoModel.surfaceCeiling]（水面 gf_high 约束），不是 ceilingGf
+ *     （第一减压站 gf_low 约束）—— 后者问「该在哪停」，前者问「能否直接出水」。
  */
 object Deco {
 
-    /** 1 bar 对应的海水深度（10 m/bar 简化，与 libdivecomputer 内部一致，误差 <2%） */
-    const val M_PER_BAR = 10.0
-    const val SURFACE_PRESSURE = 1.0    // bar，水面绝对压
+    /** 平均海平面大气压（bar）。 */
+    const val SURFACE_PRESSURE = 1.01325
+
+    /** 37°C 肺泡水蒸气压（bar，Bühlmann Rq=1.0）。 */
+    const val WATER_VAPOR_PRESSURE = 0.0627
+
+    /** 海水密度 kg/L，重力加速度 m/s²。 */
+    const val WATER_DENSITY = 1.03
+    const val GRAVITY = 9.80665
+    const val BAR_PER_METER = WATER_DENSITY * GRAVITY / 100.0
+
+    /** 1 bar 对应的海水深度（m），≈ 9.8997；旧版用 10 m/bar 简化。 */
+    const val M_PER_BAR = 1.0 / BAR_PER_METER
 
     /** 上升速率告警阈值（m/min）。休闲潜水通用 18，保守 10。 */
     const val ASCENT_LIMIT = 18.0
@@ -34,18 +53,18 @@ object Deco {
 
     // ZHL-16C：氮气半时（分钟）
     private val N2_HALF_TIMES = doubleArrayOf(
-        4.0, 8.0, 12.5, 18.5, 27.0, 38.3, 54.3, 77.0,
+        5.0, 8.0, 12.5, 18.5, 27.0, 38.3, 54.3, 77.0,
         109.0, 146.0, 187.0, 239.0, 305.0, 390.0, 498.0, 635.0,
     )
 
     // ZHL-16C：氮气 A 系数（bar）
     private val N2_A = doubleArrayOf(
-        1.1696, 1.0000, 0.8618, 0.7562, 0.6667, 0.5600,
-        0.4947, 0.4500, 0.4187, 0.3798, 0.3497, 0.3223,
-        0.2850, 0.2737, 0.2523, 0.2327,
+        1.1696, 1.0000, 0.8618, 0.7562, 0.6200, 0.5043,
+        0.4410, 0.4000, 0.3750, 0.3500, 0.3295, 0.3065,
+        0.2835, 0.2610, 0.2480, 0.2327,
     )
 
-    // ZHL-16C：氮气 B 系数（无量纲）
+    // ZHL-16C：氮气 B 系数（无量纲，M = a + p_amb / b）
     private val N2_B = doubleArrayOf(
         0.5578, 0.6514, 0.7222, 0.7825, 0.8126, 0.8434,
         0.8693, 0.8910, 0.9092, 0.9222, 0.9319, 0.9403,
@@ -54,8 +73,8 @@ object Deco {
 
     // ZHL-16C：氦气半时（分钟）
     private val HE_HALF_TIMES = doubleArrayOf(
-        1.51, 3.02, 4.52, 6.04, 9.05, 12.07, 18.11, 24.14,
-        36.20, 48.26, 60.37, 72.45, 90.57, 120.76, 150.94, 181.02,
+        1.88, 3.02, 4.72, 6.99, 10.21, 14.48, 20.53, 29.11,
+        41.20, 55.19, 70.69, 90.34, 115.29, 147.42, 188.24, 240.03,
     )
 
     private val HE_A = doubleArrayOf(
@@ -85,13 +104,13 @@ object Deco {
         ((pressureBar - SURFACE_PRESSURE) * M_PER_BAR).coerceAtLeast(0.0)
 
     /**
-     * ZHL-16C 组织模型。tissues[i] = (pn2, phe)，单位 bar。
+     * ZHL-16C 组织模型。tissues[i] = (pn2, phe)，单位 bar，均为惰性气体分压。
      * 可变状态，仅用于单线程分析；测试可 [copy]。
      */
     class DecoModel(val gas: Gas = AIR) {
-        var pn2 = DoubleArray(NCOMP) { SURFACE_PRESSURE * gas.n2 }
+        var pn2 = DoubleArray(NCOMP) { (SURFACE_PRESSURE - WATER_VAPOR_PRESSURE) * gas.n2 }
             private set
-        var phe = DoubleArray(NCOMP) { SURFACE_PRESSURE * gas.he }
+        var phe = DoubleArray(NCOMP) { (SURFACE_PRESSURE - WATER_VAPOR_PRESSURE) * gas.he }
             private set
 
         fun tissuePressure(i: Int): Double = pn2[i] + phe[i]
@@ -99,43 +118,43 @@ object Deco {
         /**
          * 一段线性深度变化的 Schreiner 更新。
          *   P = Palv + (P0 - Palv) * e^(-kt) + R * (t - (1 - e^(-kt))/k)
-         * 其中 P_alv = f_gas * p0 是**段起始**的吸入惰性气体分压，
-         * R = f_gas * (dp/dt) 是惰性气体分压变化率。
+         * 其中 P_alv = f_gas * (p_amb0 - p_wv) 是**段起始**的吸入惰性气体分压，
+         * R = f_gas * (dp_amb/dt) 是惰性气体分压变化率（水蒸气为常数，不参与微分）。
          *
-         * 坑（2026-11 审查确认）：Palv 必须用 p0，不能用 p1。
-         * 用 p1 再叠加 R 项等于把深度变化算了两遍 —— 下降段负荷虚高、
-         * 上升段过度排气，ceiling 会偏浅。恒深度段 p0==p1 看不出来，
-         * 所以以前的黄金值（全是恒底停）一直没暴露。
+         * 坑（v0.1.3 审查确认）：Palv 必须用 p0，不能用 p1。用 p1 再叠加 R 项
+         * 等于把深度变化算了两遍 —— 下降段负荷虚高、上升段过度排气。恒深度段
+         * p0==p1 看不出来，所以以前的黄金值（全是恒底停）一直没暴露。
          */
         fun addSegment(depth0: Double, depth1: Double, timeMin: Double, g: Gas = gas) {
             if (timeMin <= 0) return   // 瞬时深度跳变：不更新
             val p0 = depthToPressure(depth0)
             val p1 = depthToPressure(depth1)
             val rate = (p1 - p0) / timeMin      // bar/min
+            val pAlvBase = p0 - WATER_VAPOR_PRESSURE
 
             val fn2 = g.n2
             val fhe = g.he
             for (i in 0 until NCOMP) {
                 // 氮气（肺泡分压基准 = 段起始吸入分压）
-                val palvN2 = p0 * fn2
+                val palvN2 = pAlvBase * fn2
                 val kN2 = ln(2.0) / N2_HALF_TIMES[i]
-                val rN2 = fn2 * rate
-                pn2[i] = palvN2 + (pn2[i] - palvN2) * exp(-kN2 * timeMin) +
-                    rN2 * (timeMin - (1.0 - exp(-kN2 * timeMin)) / kN2)
+                val eN2 = exp(-kN2 * timeMin)
+                pn2[i] = palvN2 + (pn2[i] - palvN2) * eN2 +
+                    fn2 * rate * (timeMin - (1.0 - eN2) / kN2)
 
                 // 氦气
-                val palvHe = p0 * fhe
+                val palvHe = pAlvBase * fhe
                 val kHe = ln(2.0) / HE_HALF_TIMES[i]
-                val rHe = fhe * rate
-                phe[i] = palvHe + (phe[i] - palvHe) * exp(-kHe * timeMin) +
-                    rHe * (timeMin - (1.0 - exp(-kHe * timeMin)) / kHe)
+                val eHe = exp(-kHe * timeMin)
+                phe[i] = palvHe + (phe[i] - palvHe) * eHe +
+                    fhe * rate * (timeMin - (1.0 - eHe) / kHe)
             }
         }
 
-        /** 水面间隔：在 1 bar 呼吸空气排气。 */
+        /** 水面间隔：在水面呼吸当前气体排气。 */
         fun addSurfaceInterval(minutes: Double) = addSegment(0.0, 0.0, minutes)
 
-        /** A/B 系数，按组织内 N2/He 比例插值。 */
+        /** A/B 系数，按组织内 N2/He 负荷比例线性插值（见类注释坑2）。 */
         private fun ab(i: Int): Pair<Double, Double> {
             val tot = pn2[i] + phe[i]
             if (tot <= 0) return N2_A[i] to N2_B[i]
@@ -143,16 +162,20 @@ object Deco {
             return (N2_A[i] * (1 - wHe) + HE_A[i] * wHe) to (N2_B[i] * (1 - wHe) + HE_B[i] * wHe)
         }
 
-        /** Bühlmann M 值线：允许的最大组织惰性气体分压。 */
+        /** Bühlmann M 值线：允许的最大组织惰性气体分压（用总环境压，不扣水蒸气）。 */
         fun mValue(i: Int, pAmb: Double): Double {
             val (a, b) = ab(i)
             return a + pAmb / b
         }
 
+        /** 环境压对应的吸入惰性气体分压：f * (p_amb - p_wv)。 */
+        fun inspiredInertPressure(pAmb: Double): Double =
+            gas.inertTotal * (pAmb - WATER_VAPOR_PRESSURE)
+
         /**
          * GF99 通用式：给定环境压 [pAmb] 下，组织过饱和梯度相对 M 值线的百分比
          * （取所有组织最大值）。
-         *   GF99 = (P_tissue - f*P_amb) / (M - f*P_amb) * 100
+         *   GF99 = (P_tissue - f*(P_amb - p_wv)) / (M - f*(P_amb - p_wv)) * 100
          *
          * 注意这个函数的语义完全取决于 [pAmb]：
          *  - 传 [SURFACE_PRESSURE] = 标准定义的「直冲水面 GF99」，见 [gf99Surface]；
@@ -160,13 +183,11 @@ object Deco {
          * 界面、图表、100% 阈值线一律用前者，别在这里传深度压。
          */
         fun gf99(pAmb: Double): Double {
-            val f = gas.inertTotal
-            val pInert = f * pAmb
+            val pInert = inspiredInertPressure(pAmb)
             var worst = -1e9
             for (i in 0 until NCOMP) {
                 val pt = tissuePressure(i)
-                val m = mValue(i, pAmb)
-                val denom = m - pInert
+                val denom = mValue(i, pAmb) - pInert
                 if (denom <= 1e-9) continue
                 val g = (pt - pInert) / denom * 100.0
                 if (g > worst) worst = g
@@ -186,34 +207,86 @@ object Deco {
         fun gf99Surface(): Double = gf99(SURFACE_PRESSURE)
 
         /**
-         * 给定生效 gf，反解天花板深度（m）。
-         * 由 P_tissue = f*P_amb + gf*(A + P_amb/B - f*P_amb)
-         * 解出 P_amb = (P_tissue - gf*A) / (f*(1-gf) + gf/B)
+         * 常数 gf 下允许的最小环境压（bar），取所有组织最严格的那个。
+         * 由 P_tissue = f*(p - p_wv) + gf*(a + p/b - f*(p - p_wv)) 解出：
+         *   p = (P_tissue - gf*a + f*p_wv*(1-gf)) / (f*(1-gf) + gf/b)
          */
-        private fun ceilingAtGf(gf: Double, f: Double): Double {
+        private fun ceilingPressureAtGf(gf: Double): Double {
+            val f = gas.inertTotal
             var worst = -1e9
             for (i in 0 until NCOMP) {
                 val (a, b) = ab(i)
                 val denom = f * (1.0 - gf) + gf / b
                 if (denom <= 1e-9) continue
-                val pAllowed = (tissuePressure(i) - gf * a) / denom
-                val d = (pAllowed - SURFACE_PRESSURE) * M_PER_BAR
-                if (d > worst) worst = d
+                val num = tissuePressure(i) - gf * a +
+                    f * WATER_VAPOR_PRESSURE * (1.0 - gf)
+                val pAllowed = num / denom
+                if (pAllowed > worst) worst = pAllowed
             }
             return worst
         }
 
         /**
-         * 带 Gradient Factor 的天花板（m，>=0）。锚点用 gf_low，见类注释坑2。
+         * 当前时刻的 GF-low 第一减压站锚点压力（bar），不低于水面压。
+         *
+         * Subsurface 的 `gf_low_pressure_this_dive` 取的是整次潜水里这个值的
+         * **历史最大值**：锚点一旦定下就冻结，不随后续排气漂移。
+         * [analyzeProfile] 与 [series] 负责按剖面推进这个状态。
          */
-        fun ceilingGf(gfLow: Double, gfHigh: Double, depth: Double): Double {
+        fun gfLowAnchorPressure(gfLow: Double): Double =
+            ceilingPressureAtGf(gfLow).coerceAtLeast(SURFACE_PRESSURE)
+
+        /**
+         * 带 Gradient Factor 的天花板（m，>=0）。
+         *
+         * Subsurface / deco-planner 的标准解法：在 (环境压 p, 允许组织张力 Y)
+         * 平面上，以水面 `(S, gf_high)` 与冻结的第一减压站 `(L, gf_low)` 连成
+         * 直线，解析求 Y = P_tissue 与直线的交点：
+         *   Y(p)   = f*(p-p_wv) + gf*(a + p/b - f*(p-p_wv))
+         *   Y_S    = Y(S) with gf_high
+         *   Y_L    = Y(L) with gf_low
+         *   p_ceil = S + (P_tissue - Y_S) * (L - S) / (Y_L - Y_S)
+         * 取所有组织中最大的 p_ceil 换算成深度。
+         *
+         * 常数 gf（gf_low == gf_high）时 Y 本身线性，此解与闭式解精确一致
+         * （DecoTest 有对应用例）。Y_L <= Y_S 时水面 gf_high 已允许直接出水，
+         * 该组织不存在天花板，按 Subsurface/decoplanner 的做法过滤。
+         *
+         * [depth] 仅为兼容旧签名保留：GF ceiling 由组织状态决定，与当前深度无关。
+         * [anchorPressure] 传整条潜水冻结下来的锚点；< 0 时用当前时刻值。
+         */
+        @Suppress("UNUSED_PARAMETER")
+        fun ceilingGf(
+            gfLow: Double,
+            gfHigh: Double,
+            depth: Double,
+            anchorPressure: Double = -1.0,
+        ): Double {
+            val s = SURFACE_PRESSURE
+            var anchor = gfLowAnchorPressure(gfLow)
+            if (anchorPressure >= 0.0 && anchorPressure > anchor) anchor = anchorPressure
+            if (anchor <= s + 1e-9) return 0.0
+            val l = anchor
+
             val f = gas.inertTotal
-            val cLow = ceilingAtGf(gfLow, f)
-            if (cLow <= 0) return 0.0
-            if (depth >= cLow) return cLow
-            val frac = (depth / cLow).coerceIn(0.0, 1.0)
-            val gf = gfHigh + (gfLow - gfHigh) * frac
-            return ceilingAtGf(gf, f).coerceAtLeast(0.0)
+            val pwv = WATER_VAPOR_PRESSURE
+            var worst = s
+            for (i in 0 until NCOMP) {
+                val (a, b) = ab(i)
+
+                fun tolerated(p: Double, gf: Double): Double {
+                    val inert = f * (p - pwv)
+                    return inert + gf * (a + p / b - inert)
+                }
+
+                val yS = tolerated(s, gfHigh)
+                val yL = tolerated(l, gfLow)
+                val slope = (yL - yS) / (l - s)
+                if (slope <= 1e-12) continue
+                val pAllowed = s + (tissuePressure(i) - yS) / slope
+                if (pAllowed > worst) worst = pAllowed
+            }
+            return pressureToDepth(worst)
         }
 
         /** 纯 Bühlmann（= GF 100/100）天花板（m）。 */
@@ -226,9 +299,9 @@ object Deco {
          *  - [ceilingGf] 是"我该在哪停"的停留深度，锚点是 gf_low（偏保守）；
          *  - NDL 问的是"我还能不能一口气出水"，对应水面的 gf_high 约束。
          * 用前者算 18m/GF50-70 会得到 9 分钟（明显偏离任何减压表），
-         * 用后者是 30 分钟，与主流电脑表一致。
+         * 用后者是 30 分钟量级，与主流电脑表一致。
          */
-        fun surfaceCeiling(gfHigh: Double): Double = ceilingAtGf(gfHigh, gas.inertTotal)
+        fun surfaceCeiling(gfHigh: Double): Double = pressureToDepth(ceilingPressureAtGf(gfHigh))
 
         fun copy(): DecoModel {
             val m = DecoModel(gas)
@@ -312,6 +385,7 @@ object Deco {
         var decoSec = 0
         var ascentMax = 0.0
         var ascentViolations = 0
+        var anchor = SURFACE_PRESSURE   // 冻结的第一减压站锚点，只增不减
 
         var prevT = samples[0].first
         var prevD = samples[0].second
@@ -328,7 +402,8 @@ object Deco {
             val g99 = model.gf99Surface()
             if (g99 > gf99Max) gf99Max = g99
 
-            val c = model.ceilingGf(algorithm.gfLow, algorithm.gfHigh, d)
+            anchor = model.gfLowAnchorPressure(algorithm.gfLow).coerceAtLeast(anchor)
+            val c = model.ceilingGf(algorithm.gfLow, algorithm.gfHigh, d, anchor)
             if (c > ceilingMax) ceilingMax = c
             if (c > 0.0) decoSec += (t - prevT)
 
@@ -344,7 +419,6 @@ object Deco {
 
         // 出水后补 30 秒到水面：日志经常在水面截断，最后一段上升没记全。
         // 这一步的 GF99 要计入峰值，否则「出水前那一刻」的风险会被系统性低估。
-        // （以前这段算了不用，是死代码。）
         if (prevD > 0) {
             model.addSegment(prevD, 0.0, 0.5, gas)
             val g = model.gf99Surface()
@@ -364,7 +438,7 @@ object Deco {
     /** NDL 计算上限（秒）：99 分钟以上统一按"99+"展示，够用了。 */
     const val NDL_CAP = 99 * 60
 
-    /** NDL 仿真步长（秒）。1 分钟精度对曲线展示足够，且把开销压到毫秒级。 */
+    /** NDL 结果量化步长（秒）。二分求出连续值后向下取整到这个粒度。 */
     const val NDL_STEP = 60
 
     /**
@@ -375,7 +449,9 @@ object Deco {
      *  - 返回 [NDL_CAP]    => 至少还能免减压 99 分钟以上
      *
      * 判据用 [DecoModel.surfaceCeiling]（gf_high 在水面的约束），见其注释。
-     * 实现是"原地继续呼吸"的仿真，不改动传入模型（内部 copy）。
+     * 恒深度段的 Schreiner 是闭式的，任意分钟一步就能算到，因此用二分搜索
+     * 代替 99 次逐分钟仿真（deco-planner planner.py 的做法），40 次迭代即可。
+     * 不改动传入模型（内部 copy）。
      */
     fun ndlSec(
         model: DecoModel,
@@ -384,16 +460,24 @@ object Deco {
         capS: Int = NDL_CAP,
         stepS: Int = NDL_STEP,
     ): Int {
-        // 已经不能直接出水了就直接返回 0，省掉一次完整仿真
         if (model.surfaceCeiling(algorithm.gfHigh) > 0.01) return 0
-        val m = model.copy()
-        var t = 0
-        while (t < capS) {
-            m.addSegment(depth, depth, stepS / 60.0)
-            t += stepS
-            if (m.surfaceCeiling(algorithm.gfHigh) > 0.01) return t
+        val capMin = capS / 60.0
+
+        fun violates(minutes: Double): Boolean {
+            val m = model.copy()
+            m.addSegment(depth, depth, minutes)
+            return m.surfaceCeiling(algorithm.gfHigh) > 0.01
         }
-        return capS
+
+        if (!violates(capMin)) return capS
+        var lo = 0.0
+        var hi = capMin
+        repeat(40) {
+            val mid = (lo + hi) / 2.0
+            if (violates(mid)) hi = mid else lo = mid
+        }
+        val sec = (lo * 60.0).toInt()
+        return (sec / stepS) * stepS
     }
 
     /** 剖面时间序列上的一个点（画图用）。 */
@@ -428,18 +512,20 @@ object Deco {
         val stride = if (!computeNdl) 0 else (samples.size / ndlPoints).coerceAtLeast(1)
         val anchorIdx = ArrayList<Int>()
         val anchorNdl = ArrayList<Int>()
+        var anchor = SURFACE_PRESSURE
 
-        fun point(s: Sample): SeriesPoint {
+        fun point(s: Sample, gfAnchor: Double): SeriesPoint {
             return SeriesPoint(
                 t = s.t,
                 depth = s.depth,
                 temp = s.temp,
                 gf99 = model.gf99Surface().coerceAtLeast(0.0),
-                ceiling = model.ceilingGf(algorithm.gfLow, algorithm.gfHigh, s.depth),
+                ceiling = model.ceilingGf(algorithm.gfLow, algorithm.gfHigh, s.depth, gfAnchor),
             )
         }
 
-        out.add(point(samples[0]))
+        anchor = model.gfLowAnchorPressure(algorithm.gfLow).coerceAtLeast(anchor)
+        out.add(point(samples[0], anchor))
         if (stride > 0) {
             anchorIdx.add(0)
             anchorNdl.add(ndlSec(model, algorithm, samples[0].depth))
@@ -455,7 +541,8 @@ object Deco {
                 prevT = s.t
                 prevD = s.depth
             }
-            out.add(point(s))
+            anchor = model.gfLowAnchorPressure(algorithm.gfLow).coerceAtLeast(anchor)
+            out.add(point(s, anchor))
             if (stride > 0 && (i % stride == 0 || i == samples.size - 1)) {
                 anchorIdx.add(i)
                 anchorNdl.add(ndlSec(model, algorithm, s.depth))

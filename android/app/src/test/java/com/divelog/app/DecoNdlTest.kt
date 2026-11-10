@@ -9,8 +9,11 @@ import org.junit.Test
  *
  * 判据说明见 Deco.DecoModel.surfaceCeiling：
  * NDL 问的是"还能不能一口气出水"，所以用 gf_high 在水面的约束，
- * 这与主流电脑表/减压表量级一致（18m GF50/70 实测 ≈ 23 分钟），
+ * 这与主流电脑表/减压表量级一致（v0.1.4 口径下 18m GF50/70 实测 ≈ 24 分钟），
  * 而用天花板（gf_low 锚点）会算出 9 分钟，明显不对。
+ *
+ * v0.1.4 起 NDL 用二分搜索（deco-planner 的做法）替代 99 次逐分钟仿真，
+ * [ndl_binary_search_agrees_with_minute_simulation] 守着两者等价。
  */
 class DecoNdlTest {
 
@@ -101,5 +104,25 @@ class DecoNdlTest {
         val loose = Deco.ndlSec(m1, algo("zhl16c"), 18.0)
         val strict = Deco.ndlSec(m2, algo("gf20_60"), 18.0)
         assertTrue("ZHL(${loose}s) 应比 GF20/60(${strict}s) 更宽松", loose > strict)
+    }
+
+    @Test
+    fun `ndl_binary_search_agrees_with_minute_simulation`() {
+        // 独立 oracle：逐分钟仿真，找最后一个仍可直接出水的整分钟。
+        // 二分搜索必须给出同一个值（量化到 1 分钟）。
+        val m = Deco.DecoModel()
+        val a = algo("gf50_70")
+        val binary = Deco.ndlSec(m, a, 18.0)
+        var lastSafeMinute = 0
+        for (min in 1..99) {
+            val probe = m.copy()
+            probe.addSegment(18.0, 18.0, min.toDouble())
+            if (probe.surfaceCeiling(a.gfHigh) > 0.01) break
+            lastSafeMinute = min
+        }
+        assertEquals(
+            "二分 NDL($binary s) 应与逐分钟仿真($lastSafeMinute min) 一致",
+            lastSafeMinute * 60, binary,
+        )
     }
 }

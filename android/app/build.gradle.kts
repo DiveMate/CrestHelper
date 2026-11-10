@@ -26,8 +26,8 @@ android {
         applicationId = "com.divelog.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.1.3"
+        versionCode = 5
+        versionName = "0.1.4"
         ndk {
             abiFilters += listOf("arm64-v8a")   // 只编真机架构，加快构建
         }
