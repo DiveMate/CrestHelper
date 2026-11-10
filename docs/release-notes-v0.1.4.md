@@ -3,7 +3,8 @@
 > 对应 `versionCode 5 / versionName 0.1.4`，tag `v0.1.4`，APK 仅 `arm64-v8a`。
 > 本文即 GitHub Release 正文，可直接整段复制到 Release 页面。
 
-这一版**只动减压内核和文档**：不改界面、不改同步、不改数据库结构。
+这一版**主要动减压内核和文档**：不改同步、不改数据库结构。界面只有一处收尾
+——把「潜水日志」标题栏那个重复的「+」导入按钮删掉，导入统一走「设备 → 导入日志」。
 起因是拿自己写的另一套潜前计划器 `deco-planner` 与 Subsurface `core/deco.cpp`
 逐项对拍，发现我们标着「ZHL-16C」的内核其实有三处口径没对齐。
 
@@ -41,6 +42,12 @@ He 的 a/b 反而是对的。现在 16 组 N₂/He 半时与 a/b 全部换成公
 恒深度段的 Schreiner 是闭式的，任意分钟一步就能算到，所以 40 次二分即可取代
 99 次逐分钟仿真。结果与逐分钟仿真一致，曲线开销从「277 点 × 99 次」降到毫秒级。
 
+**5. 去掉日志页重复的导入入口**
+
+「潜水日志」标题栏右侧原本有个 `+`，功能与「设备 → 导入日志 → 选择文件导入」
+完全一样（共用同一个 `importLauncher`）。现在只保留设备页那一个入口；导入进度条、
+解析入库链路都没变，只是少了一个重复按钮。
+
 ## 升级后数字会变 —— 这是预期的
 
 口径三处同时变了，**v0.1.4 与 v0.1.3 的 GF99 / 最小安全深度 / 减压时长不能直接比较**。
@@ -72,6 +79,8 @@ GF99 峰值下移主要来自水蒸气扣除与参数表修正；这两条都是
   水蒸气扣除、常数 GF 解析解自洽、GF ceiling 与当前深度无关、短深潜无虚假减压义务、
   NDL 二分与逐分钟仿真一致）
 - `tools/deco.py`（Python 基准）与 `Deco.kt`（Kotlin）逐行对拍，黄金值全部重算
+- 真机（Galaxy S23 / Android 16）覆盖安装验证：日志页 `+` 已消失、设备页
+  「选择文件导入」可用、297 条 / 247 组数据完整保留，无崩溃
 
 ## 安装
 
@@ -79,7 +88,7 @@ GF99 峰值下移主要来自水蒸气扣除与参数表修正；这两条都是
 | --- | --- |
 | 文件 | `CrestHelper-0.1.4-arm64-v8a.apk` |
 | 大小 | 7,204,946 字节（约 6.9 MB） |
-| MD5 | `f1e46135a4899180fcb20a5e3ecbaa4a` |
+| MD5 | `235d158eb923cf45ab9bc48318d24bbc` |
 | 签名 | 与 0.1.1~0.1.3 同一证书（SHA-256 `f97af9ba…e1`） |
 | 系统 | Android 8.0+（minSdk 26，targetSdk 35） |
 | 架构 | 仅 `arm64-v8a`，32 位设备装不上 |
@@ -119,8 +128,9 @@ GF99 峰值下移主要来自水蒸气扣除与参数表修正；这两条都是
 
 ### What changed
 
-Decompression kernel and docs only — no UI, sync or database changes. The trigger was a
-line-by-line comparison against my own dive planner (`deco-planner`) and Subsurface
+Mainly the decompression kernel and docs — no sync or database changes. The one UI cleanup
+removes a duplicate import button from the log screen (import now lives only under Device).
+The trigger was a line-by-line comparison against my own dive planner (`deco-planner`) and Subsurface
 `core/deco.cpp`, which showed three places where our "ZHL-16C" kernel did not match the label.
 
 1. **Real ZHL-16C tissue table.** The old one mixed a `4.0 min` N₂ half-time (16C uses `5.0`),
@@ -140,6 +150,9 @@ line-by-line comparison against my own dive planner (`deco-planner`) and Subsurf
    following Subsurface `tissue_tolerance_calc()`. With constant GF the analytic and
    closed-form solutions are identical (covered by a test).
 4. **NDL via binary search** instead of 99 one-minute simulations; identical results.
+5. **Removed the duplicate import entry.** The `+` in the log screen's top bar shared the
+   same `importLauncher` as "Device → Import logs → Choose files"; only the Device entry
+   remains. The progress indicator and import pipeline are unchanged.
 
 ### Numbers will change — that is expected
 
@@ -163,12 +176,14 @@ within the same version — never for judging whether a dive was safe.
   integration differ by <1e-10
 - `bash android/at.sh unit`: **172 tests, 0 failures** (6 new guard tests)
 - `tools/deco.py` and `Deco.kt` kept in lockstep; all golden values recomputed
+- On-device check (Galaxy S23 / Android 16): log screen `+` gone, Device import button
+  still works, all 297 records / 247 groups intact, no crashes
 
 ### Install
 
 | | |
 | --- | --- |
-| File | `CrestHelper-0.1.4-arm64-v8a.apk` (7,204,946 bytes, MD5 `f1e46135…ba4a`) |
+| File | `CrestHelper-0.1.4-arm64-v8a.apk` (7,204,946 bytes, MD5 `235d158e…4bbc`) |
 | Requires | Android 8.0+ (minSdk 26, targetSdk 35) |
 | ABI | `arm64-v8a` only |
 | Tested on | Galaxy S23 (SM-S9110, Android 16) |
