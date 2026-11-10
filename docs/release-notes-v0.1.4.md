@@ -81,6 +81,15 @@ GF99 峰值下移主要来自水蒸气扣除与参数表修正；这两条都是
 - `tools/deco.py`（Python 基准）与 `Deco.kt`（Kotlin）逐行对拍，黄金值全部重算
 - 真机（Galaxy S23 / Android 16）覆盖安装验证：日志页 `+` 已消失、设备页
   「选择文件导入」可用、297 条 / 247 组数据完整保留，无崩溃
+- 真机**算法数值对拍**：把手机 `divelog.db` 里的真实剖面喂给 `tools/deco.py` 算基准，
+  再与详情页 UI 逐项比对：
+
+  | 记录 | Python 基准 | 手机 UI |
+  | --- | --- | --- |
+  | `#334` 浅潜 7.2 m / 45 min | GF99 25.0% · 天花板 0 m · 减压 0 s · 上升 9.6 m/min | 25% · 无 · 0:00 · 9.6 m/min |
+  | `#255` 深潜 32.1 m / 40:45 | GF99 87.2% · 天花板 5.90 m · 减压 630 s | 87.2% · 5.9 m · 10:30 · NDL「已减压」 |
+
+  GF99 曲线峰值标注、NDL 剩余曲线、深度剖面（含水温与红色天花板线）均正常渲染。
 
 ## 安装
 
@@ -178,6 +187,11 @@ within the same version — never for judging whether a dive was safe.
 - `tools/deco.py` and `Deco.kt` kept in lockstep; all golden values recomputed
 - On-device check (Galaxy S23 / Android 16): log screen `+` gone, Device import button
   still works, all 297 records / 247 groups intact, no crashes
+- On-device **numeric cross-check**: real profiles pulled from the phone's `divelog.db`
+  were replayed with `tools/deco.py` and compared against the detail screen —
+  `#334` (7.2 m / 45 min) GF99 25.0% / ceiling 0 m / deco 0 s, `#255` (32.1 m / 40:45)
+  GF99 87.2% / ceiling 5.90 m / deco 630 s (10:30). All values matched; GF99 curve,
+  remaining-NDL curve and the depth profile with ceiling line render correctly.
 
 ### Install
 
